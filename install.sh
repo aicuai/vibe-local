@@ -9,7 +9,9 @@
 #   bash install.sh --model qwen3:8b
 #   bash install.sh --lang en
 
-set -euo pipefail
+# NOTE: set -e を使わない (途中停止を防ぐ)
+# 各ステップで個別にエラーハンドリングする
+set -uo pipefail
 
 # ╔══════════════════════════════════════════════════════════════╗
 # ║  🎨  Ｖ Ａ Ｐ Ｏ Ｒ Ｗ Ａ Ｖ Ｅ   Ｃ Ｏ Ｌ Ｏ Ｒ Ｓ    ║
@@ -103,8 +105,11 @@ MSG_ja_manual_model="手動指定モデル"
 MSG_ja_installed="インストール済み"
 MSG_ja_installing="インストール中..."
 MSG_ja_install_done="インストール完了"
+MSG_ja_install_fail="インストール失敗"
+MSG_ja_install_fail_hint="手動でインストールしてから再実行してください"
 MSG_ja_no_pkgmgr="パッケージマネージャが見つかりません"
 MSG_ja_ollama_starting="Ollama を起動中..."
+MSG_ja_ollama_wait="Ollama 起動待ち中"
 MSG_ja_model_downloading="モデルをダウンロード中..."
 MSG_ja_model_download_hint="初回はサイズに応じて数分〜数十分かかります"
 MSG_ja_model_downloaded="ダウンロード済み"
@@ -140,6 +145,8 @@ MSG_ja_help_usage="Usage: install.sh [--model MODEL_NAME] [--lang LANG]"
 MSG_ja_help_model="使用するOllamaモデルを指定 (例: qwen3:8b)"
 MSG_ja_help_lang="言語指定: ja, en, zh"
 MSG_ja_unknown_opt="不明なオプション"
+MSG_ja_brew_slow="Homebrew の初回セットアップには数分かかります。お待ちください..."
+MSG_ja_npm_perm="npm のグローバルインストールに失敗。権限を変更して再試行中..."
 
 # === English ===
 MSG_en_subtitle="✨🌴  Ｆ Ｒ Ｅ Ｅ  Ａ Ｉ  Ｃ Ｏ Ｄ Ｉ Ｎ Ｇ  Ｅ Ｎ Ｖ Ｉ Ｒ Ｏ Ｎ Ｍ Ｅ Ｎ Ｔ  🌴✨"
@@ -176,8 +183,11 @@ MSG_en_manual_model="Manual model"
 MSG_en_installed="installed"
 MSG_en_installing="Installing..."
 MSG_en_install_done="installed"
+MSG_en_install_fail="install failed"
+MSG_en_install_fail_hint="Please install manually, then re-run this script"
 MSG_en_no_pkgmgr="No package manager found"
 MSG_en_ollama_starting="Starting Ollama..."
+MSG_en_ollama_wait="Waiting for Ollama"
 MSG_en_model_downloading="Downloading model..."
 MSG_en_model_download_hint="First download may take several minutes depending on size"
 MSG_en_model_downloaded="already downloaded"
@@ -213,6 +223,8 @@ MSG_en_help_usage="Usage: install.sh [--model MODEL_NAME] [--lang LANG]"
 MSG_en_help_model="Specify Ollama model (e.g. qwen3:8b)"
 MSG_en_help_lang="Language: ja, en, zh"
 MSG_en_unknown_opt="Unknown option"
+MSG_en_brew_slow="First-time Homebrew setup takes a few minutes. Please wait..."
+MSG_en_npm_perm="npm global install failed. Fixing permissions and retrying..."
 
 # === Chinese ===
 MSG_zh_subtitle="✨🌴  免 费 Ａ Ｉ 编 程 环 境  🌴✨"
@@ -249,8 +261,11 @@ MSG_zh_manual_model="手动指定模型"
 MSG_zh_installed="已安装"
 MSG_zh_installing="安装中..."
 MSG_zh_install_done="安装完成"
+MSG_zh_install_fail="安装失败"
+MSG_zh_install_fail_hint="请手动安装后重新运行此脚本"
 MSG_zh_no_pkgmgr="未找到包管理器"
 MSG_zh_ollama_starting="正在启动 Ollama..."
+MSG_zh_ollama_wait="等待 Ollama 启动"
 MSG_zh_model_downloading="下载模型中..."
 MSG_zh_model_download_hint="首次下载可能需要几分钟到几十分钟"
 MSG_zh_model_downloaded="已下载"
@@ -286,6 +301,8 @@ MSG_zh_help_usage="Usage: install.sh [--model MODEL_NAME] [--lang LANG]"
 MSG_zh_help_model="指定Ollama模型 (例: qwen3:8b)"
 MSG_zh_help_lang="语言: ja, en, zh"
 MSG_zh_unknown_opt="未知选项"
+MSG_zh_brew_slow="首次 Homebrew 设置需要几分钟，请耐心等待..."
+MSG_zh_npm_perm="npm 全局安装失败，正在修复权限并重试..."
 
 # ╔══════════════════════════════════════════════════════════════╗
 # ║  🎬  Ａ Ｎ Ｉ Ｍ Ａ Ｔ Ｉ Ｏ Ｎ   Ｅ Ｎ Ｇ Ｉ Ｎ Ｅ    ║
@@ -359,6 +376,49 @@ vaporwave_progress() {
         printf "\033[38;5;${colors[$ci]}m█"
     done
     printf "${MAGENTA}▌${NC} ${BOLD}${NEON_GREEN}100%%${NC} 🎉 \n"
+}
+
+# ╔══════════════════════════════════════════════════════════════╗
+# ║  🌀  ＬＩＶＥ  ＳＰＩＮＮＥＲ  (長時間コマンド用)         ║
+# ╚══════════════════════════════════════════════════════════════╝
+#
+# run_with_spinner "表示ラベル" command args...
+#   → コマンドをバックグラウンドで実行しながらアニメーションスピナーを表示
+#   → ログは $SPINNER_LOG に保存 (デバッグ用)
+#   → 戻り値: コマンドの終了コード
+
+SPINNER_LOG="/tmp/vibe-local-install-$$.log"
+
+run_with_spinner() {
+    local label="$1"
+    shift
+    local sparkles=("✨" "💎" "🔮" "💜" "🌸" "🎵" "🌊" "⚡" "🔥" "💫" "🌈" "🦄")
+    local -a colors=(198 171 165 129 93 57 51 50 49 48 47 46)
+    local num_colors=${#colors[@]}
+    local sec=0
+
+    # バックグラウンドでコマンド実行
+    "$@" >> "$SPINNER_LOG" 2>&1 &
+    local cmd_pid=$!
+
+    # スピナーアニメーション
+    while kill -0 "$cmd_pid" 2>/dev/null; do
+        local si=$(( sec % ${#sparkles[@]} ))
+        local ci=$(( sec % num_colors ))
+        local elapsed=$(( sec / 2 ))
+        printf "\r  ${sparkles[$si]} \033[38;5;${colors[$ci]}m${BOLD}%-35s${NC} ${DIM}${GRAY}%ds${NC}  " "$label" "$elapsed"
+        sleep 0.5
+        sec=$(( sec + 1 ))
+    done
+
+    # 終了コード取得
+    wait "$cmd_pid" 2>/dev/null
+    local exit_code=$?
+
+    # スピナー行をクリア
+    printf "\r%-60s\r" " "
+
+    return $exit_code
 }
 
 step_header() {
@@ -566,79 +626,125 @@ fi
 # =============================================
 step_header 3 "$(msg step3)"
 
+# brew は auto-update をスキップして高速化
+export HOMEBREW_NO_AUTO_UPDATE=1
+export HOMEBREW_NO_INSTALL_CLEANUP=1
+
+# --- Homebrew (macOS) ---
 if [ "$IS_MAC" -eq 1 ]; then
     if command -v brew &>/dev/null; then
         vapor_success "Homebrew 🍺 $(msg installed)"
     else
-        vaporwave_progress "Homebrew $(msg installing)" 3
-        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-        if [ -f /opt/homebrew/bin/brew ]; then
-            eval "$(/opt/homebrew/bin/brew shellenv)"
+        vapor_info "$(msg brew_slow)"
+        vapor_info "Homebrew 🍺 $(msg installing)"
+        if run_with_spinner "Homebrew 🍺 $(msg installing)" /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"; then
+            if [ -f /opt/homebrew/bin/brew ]; then
+                eval "$(/opt/homebrew/bin/brew shellenv)"
+            fi
+            vapor_success "Homebrew 🍺 $(msg install_done)"
+        else
+            vapor_error "Homebrew 🍺 $(msg install_fail)"
+            vapor_warn "$(msg install_fail_hint): /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
         fi
-        vapor_success "Homebrew 🍺 $(msg install_done)"
     fi
 fi
 
-# brew install は HOMEBREW_NO_AUTO_UPDATE=1 で高速化
-# (auto-update が走ると数分間フリーズしたように見える)
-brew_install() {
-    HOMEBREW_NO_AUTO_UPDATE=1 brew install "$@"
-}
-
+# --- Ollama ---
 if command -v ollama &>/dev/null; then
     vapor_success "Ollama 🦙 $(msg installed) ($(ollama --version 2>/dev/null || echo '?'))"
 else
-    vapor_info "Ollama 🦙 $(msg installing)"
-    if [ "$IS_MAC" -eq 1 ]; then
-        brew_install ollama
+    if [ "$IS_MAC" -eq 1 ] && command -v brew &>/dev/null; then
+        if run_with_spinner "Ollama 🦙 $(msg installing)" brew install ollama; then
+            vapor_success "Ollama 🦙 $(msg install_done)"
+        else
+            vapor_error "Ollama 🦙 $(msg install_fail)"
+            vapor_warn "$(msg install_fail_hint): brew install ollama"
+        fi
+    elif [ "$IS_LINUX" -eq 1 ]; then
+        if run_with_spinner "Ollama 🦙 $(msg installing)" bash -c "curl -fsSL https://ollama.com/install.sh | sh"; then
+            vapor_success "Ollama 🦙 $(msg install_done)"
+        else
+            vapor_error "Ollama 🦙 $(msg install_fail)"
+            vapor_warn "$(msg install_fail_hint): curl -fsSL https://ollama.com/install.sh | sh"
+        fi
     else
-        curl -fsSL https://ollama.com/install.sh | sh
+        vapor_error "Ollama 🦙 $(msg install_fail)"
     fi
-    vapor_success "Ollama 🦙 $(msg install_done)"
 fi
 
+# --- Node.js ---
 if command -v node &>/dev/null; then
     vapor_success "Node.js 💚 $(msg installed) ($(node --version))"
 else
-    vapor_info "Node.js 💚 $(msg installing)"
-    if [ "$IS_MAC" -eq 1 ]; then
-        brew_install node
-    else
+    if [ "$IS_MAC" -eq 1 ] && command -v brew &>/dev/null; then
+        if run_with_spinner "Node.js 💚 $(msg installing)" brew install node; then
+            vapor_success "Node.js 💚 $(msg install_done) ($(node --version 2>/dev/null || echo '?'))"
+        else
+            vapor_error "Node.js 💚 $(msg install_fail)"
+            vapor_warn "$(msg install_fail_hint): brew install node"
+        fi
+    elif [ "$IS_LINUX" -eq 1 ]; then
         if command -v apt-get &>/dev/null; then
-            curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
-            sudo apt-get install -y nodejs
+            run_with_spinner "Node.js 💚 $(msg installing)" bash -c "curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - && sudo apt-get install -y nodejs"
         elif command -v dnf &>/dev/null; then
-            sudo dnf install -y nodejs
+            run_with_spinner "Node.js 💚 $(msg installing)" sudo dnf install -y nodejs
         else
             vapor_error "$(msg no_pkgmgr)"
-            exit 1
+        fi
+        if command -v node &>/dev/null; then
+            vapor_success "Node.js 💚 $(msg install_done) ($(node --version))"
+        else
+            vapor_error "Node.js 💚 $(msg install_fail)"
+            vapor_warn "$(msg install_fail_hint): sudo apt-get install -y nodejs"
         fi
     fi
-    vapor_success "Node.js 💚 $(msg install_done) ($(node --version))"
 fi
 
+# --- Claude Code CLI ---
 if command -v claude &>/dev/null; then
     vapor_success "Claude Code CLI 🤖 $(msg installed)"
 else
-    vapor_info "Claude Code CLI 🤖 $(msg installing)"
-    npm install -g @anthropic-ai/claude-code
-    vapor_success "Claude Code CLI 🤖 $(msg install_done)"
-fi
-
-if command -v python3 &>/dev/null; then
-    vapor_success "Python3 🐍 $(msg installed) ($(python3 --version))"
-else
-    vapor_info "Python3 🐍 $(msg installing)"
-    if [ "$IS_MAC" -eq 1 ]; then
-        brew_install python3
+    # npm install -g は権限エラーになることがある
+    if run_with_spinner "Claude Code CLI 🤖 $(msg installing)" npm install -g @anthropic-ai/claude-code; then
+        vapor_success "Claude Code CLI 🤖 $(msg install_done)"
     else
-        if command -v apt-get &>/dev/null; then
-            sudo apt-get install -y python3
-        elif command -v dnf &>/dev/null; then
-            sudo dnf install -y python3
+        # 権限エラーの可能性 → npm prefix を変更して再試行
+        vapor_warn "$(msg npm_perm)"
+        mkdir -p "${HOME}/.npm-global"
+        npm config set prefix "${HOME}/.npm-global" 2>/dev/null || true
+        export PATH="${HOME}/.npm-global/bin:${PATH}"
+        if run_with_spinner "Claude Code CLI 🤖 $(msg installing)" npm install -g @anthropic-ai/claude-code; then
+            vapor_success "Claude Code CLI 🤖 $(msg install_done)"
+        else
+            vapor_error "Claude Code CLI 🤖 $(msg install_fail)"
+            vapor_warn "$(msg install_fail_hint): npm install -g @anthropic-ai/claude-code"
         fi
     fi
-    vapor_success "Python3 🐍 $(msg install_done)"
+fi
+
+# --- Python3 ---
+if command -v python3 &>/dev/null; then
+    vapor_success "Python3 🐍 $(msg installed) ($(python3 --version 2>/dev/null))"
+else
+    if [ "$IS_MAC" -eq 1 ] && command -v brew &>/dev/null; then
+        if run_with_spinner "Python3 🐍 $(msg installing)" brew install python3; then
+            vapor_success "Python3 🐍 $(msg install_done)"
+        else
+            vapor_error "Python3 🐍 $(msg install_fail)"
+            vapor_warn "$(msg install_fail_hint): brew install python3"
+        fi
+    elif [ "$IS_LINUX" -eq 1 ]; then
+        if command -v apt-get &>/dev/null; then
+            run_with_spinner "Python3 🐍 $(msg installing)" sudo apt-get install -y python3
+        elif command -v dnf &>/dev/null; then
+            run_with_spinner "Python3 🐍 $(msg installing)" sudo dnf install -y python3
+        fi
+        if command -v python3 &>/dev/null; then
+            vapor_success "Python3 🐍 $(msg install_done)"
+        else
+            vapor_error "Python3 🐍 $(msg install_fail)"
+        fi
+    fi
 fi
 
 # =============================================
@@ -646,21 +752,35 @@ fi
 # =============================================
 step_header 4 "$(msg step4)"
 
+# Ollama 起動確認 (スピナー付きで待つ)
 if ! curl -s --max-time 2 "http://localhost:11434/api/tags" &>/dev/null; then
     vapor_info "$(msg ollama_starting)"
     if [ "$IS_MAC" -eq 1 ]; then
-        open -a Ollama 2>/dev/null || ollama serve &>/dev/null &
+        open -a Ollama 2>/dev/null || (ollama serve &>/dev/null &)
     else
         ollama serve &>/dev/null &
     fi
-    for i in $(seq 1 15); do
-        sleep 2
-        if curl -s --max-time 2 "http://localhost:11434/api/tags" &>/dev/null; then
+
+    # スピナー付きで起動待ち (最大30秒)
+    local_sparkles=("🦙" "✨" "💫" "🌟")
+    for i in $(seq 1 30); do
+        if curl -s --max-time 1 "http://localhost:11434/api/tags" &>/dev/null; then
             break
         fi
+        si=$(( (i - 1) % ${#local_sparkles[@]} ))
+        printf "\r  ${local_sparkles[$si]} ${CYAN}$(msg ollama_wait)${NC} ${DIM}${GRAY}%ds${NC}  " "$i"
+        sleep 1
     done
+    printf "\r%-60s\r" " "
+
+    if curl -s --max-time 2 "http://localhost:11434/api/tags" &>/dev/null; then
+        vapor_success "Ollama 🦙 $(msg online)"
+    else
+        vapor_warn "Ollama 🦙 $(msg standby)"
+    fi
 fi
 
+# モデルダウンロード (ollama pull の出力をそのまま表示)
 if curl -s "http://localhost:11434/api/tags" 2>/dev/null | grep -q "$MODEL"; then
     vapor_success "$MODEL $(msg model_downloaded) 🧠✨"
 else
@@ -670,11 +790,17 @@ else
     echo -e "  ${DIM}${AQUA}      $(msg model_download_hint)${NC}"
     echo -e "  ${PINK}💜${MAGENTA}💜${PURPLE}💜${CYAN}💜${AQUA}💜${MINT}💜${NEON_GREEN}💜${YELLOW}💜${ORANGE}💜${CORAL}💜${HOT_PINK}💜${NC}"
     echo ""
+    # ollama pull はプログレスバーを stdout に出すのでそのまま見せる
+    # MLX 警告だけ stderr から除外
     ollama pull "$MODEL" 2>/dev/null
     echo ""
-    echo -e "  ${PINK}💜${MAGENTA}💜${PURPLE}💜${CYAN}💜${AQUA}💜${MINT}💜${NEON_GREEN}💜${YELLOW}💜${ORANGE}💜${CORAL}💜${HOT_PINK}💜${NC}"
-    vapor_success "$MODEL $(msg model_dl_done) 🧠🎉"
-    echo -e "  ${PINK}💜${MAGENTA}💜${PURPLE}💜${CYAN}💜${AQUA}💜${MINT}💜${NEON_GREEN}💜${YELLOW}💜${ORANGE}💜${CORAL}💜${HOT_PINK}💜${NC}"
+    if curl -s "http://localhost:11434/api/tags" 2>/dev/null | grep -q "$MODEL"; then
+        echo -e "  ${PINK}💜${MAGENTA}💜${PURPLE}💜${CYAN}💜${AQUA}💜${MINT}💜${NEON_GREEN}💜${YELLOW}💜${ORANGE}💜${CORAL}💜${HOT_PINK}💜${NC}"
+        vapor_success "$MODEL $(msg model_dl_done) 🧠🎉"
+        echo -e "  ${PINK}💜${MAGENTA}💜${PURPLE}💜${CYAN}💜${AQUA}💜${MINT}💜${NEON_GREEN}💜${YELLOW}💜${ORANGE}💜${CORAL}💜${HOT_PINK}💜${NC}"
+    else
+        vapor_warn "$MODEL $(msg install_fail) - ollama pull $MODEL"
+    fi
     echo ""
 fi
 
@@ -775,18 +901,28 @@ else
     vapor_warn "Ollama Server       → 🟡 $(msg standby)"
 fi
 
+# テストプロキシ: 空きポートを探す
+TEST_PORT=8083
+for try_port in 8083 8084 8085 8086; do
+    if ! curl -s --max-time 1 "http://127.0.0.1:${try_port}/" &>/dev/null; then
+        TEST_PORT=$try_port
+        break
+    fi
+done
+
 TEST_STATE_DIR="${HOME}/.local/state/vibe-local"
 mkdir -p "$TEST_STATE_DIR" && chmod 700 "$TEST_STATE_DIR"
-python3 "$LIB_DIR/anthropic-ollama-proxy.py" 8083 &>"${TEST_STATE_DIR}/test-proxy.log" &
+python3 "$LIB_DIR/anthropic-ollama-proxy.py" "$TEST_PORT" &>"${TEST_STATE_DIR}/test-proxy.log" &
 TEST_PID=$!
 sleep 2
 
-if curl -s --max-time 2 "http://127.0.0.1:8083/" &>/dev/null; then
+if curl -s --max-time 2 "http://127.0.0.1:${TEST_PORT}/" &>/dev/null; then
     vapor_success "API Proxy           → 🟢 $(msg online)"
 else
     vapor_warn "API Proxy           → 🟡 $(msg warning)"
 fi
 kill "$TEST_PID" 2>/dev/null || true
+wait "$TEST_PID" 2>/dev/null || true
 
 if command -v claude &>/dev/null; then
     vapor_success "Claude Code CLI     → 🟢 $(msg ready)"
@@ -799,6 +935,9 @@ if curl -s "http://localhost:11434/api/tags" 2>/dev/null | grep -q "$MODEL"; the
 else
     vapor_warn "AI Model            → 🟡 $(msg not_loaded)"
 fi
+
+# テンポラリログ削除
+rm -f "$SPINNER_LOG"
 
 # ╔══════════════════════════════════════════════════════════════╗
 # ║  🎆  Ｃ Ｏ Ｍ Ｐ Ｌ Ｅ Ｔ Ｅ !!                         ║
