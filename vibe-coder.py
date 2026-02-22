@@ -3196,6 +3196,8 @@ class Session:
 
     def save(self):
         """Save session to JSONL file and update project index."""
+        if not self.messages:
+            return  # nothing to persist; don't create empty files
         path = os.path.join(self.config.sessions_dir, f"{self.session_id}.jsonl")
         # Verify resolved path stays inside sessions_dir (path traversal guard)
         real_path = os.path.realpath(path)
@@ -4097,7 +4099,9 @@ class Agent:
                             fixed = re.sub(r',\s*]', ']', fixed)
                             tool_params = json.loads(fixed)
                         except (json.JSONDecodeError, Exception):
-                            tool_params = {"raw": raw_args}
+                            # Unsalvageable JSON — report error to LLM instead of passing bad params
+                            results.append(ToolResult(tc_id, f"Error: tool arguments are not valid JSON: {raw_args[:200]}", True))
+                            continue
                     parsed_calls.append((tc_id, tool_name, tool_params))
 
                 # Phase 2: Validate permissions on main thread
@@ -4112,7 +4116,7 @@ class Agent:
                     self.tui.show_tool_call(tool_name, tool_params)
                     # Then ask permission
                     if not self.permissions.check(tool_name, tool_params, self.tui):
-                        results.append(ToolResult(tc_id, "Permission denied by user", True))
+                        results.append(ToolResult(tc_id, "Permission denied by user. Do not retry this operation.", True))
                         self.tui.show_tool_result(tool_name, "Permission denied", True)
                         continue
                     validated_calls.append((tc_id, tool_name, tool_params, tool))
@@ -4207,6 +4211,23 @@ class Agent:
                     self.session.add_assistant_message(text)
                 print(f"\n{C.YELLOW}Interrupted.{C.RESET}")
                 self._interrupted.set()
+                break
+            except urllib.error.HTTPError as e:
+                self.tui.stop_spinner()
+                if response is not None and hasattr(response, 'close'):
+                    response.close()
+                if text:
+                    self.session.add_assistant_message(text)
+                body = ""
+                try:
+                    body = e.read().decode("utf-8", errors="replace")[:200]
+                except Exception:
+                    pass
+                print(f"\n{C.RED}HTTP {e.code} {e.reason}: {body}{C.RESET}")
+                if e.code == 404:
+                    print(f"{C.DIM}Model '{self.config.model}' not found? Run: ollama pull {self.config.model}{C.RESET}")
+                elif e.code == 400:
+                    print(f"{C.DIM}Bad request — check model name and parameters{C.RESET}")
                 break
             except urllib.error.URLError as e:
                 self.tui.stop_spinner()
