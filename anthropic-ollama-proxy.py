@@ -693,6 +693,18 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
 class ThreadedHTTPServer(http.server.HTTPServer):
     allow_reuse_address = True
 
+    def server_bind(self):
+        """Override to skip slow reverse DNS lookup (getfqdn).
+        On some networks, socket.getfqdn('127.0.0.1') hangs for minutes
+        waiting for DNS reverse lookup, which makes the proxy appear frozen."""
+        import socket
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.socket.bind(self.server_address)
+        # Set server_name directly without DNS lookup
+        host, port = self.server_address
+        self.server_name = host
+        self.server_port = port
+
     def process_request(self, request, client_address):
         t = threading.Thread(target=self._handle, args=(request, client_address))
         t.daemon = True
