@@ -1,27 +1,27 @@
 #!/bin/bash
-# claude-local.sh
+# vibe-local.sh
 # ローカルLLM (Ollama) で Claude Code を起動するスクリプト
 # Anthropic API → Ollama 変換プロキシを自動管理
 #
 # NOTE: This project is NOT affiliated with, endorsed by, or associated with Anthropic.
 #
 # 使い方:
-#   claude-local                    # インタラクティブモード
-#   claude-local -p "質問"          # ワンショット
-#   claude-local --auto             # ネットワーク状況で自動判定
-#   claude-local --model qwen3:8b   # モデル手動指定
-#   claude-local -y                 # パーミッション確認スキップ (自己責任)
+#   vibe-local                    # インタラクティブモード
+#   vibe-local -p "質問"          # ワンショット
+#   vibe-local --auto             # ネットワーク状況で自動判定
+#   vibe-local --model qwen3:8b   # モデル手動指定
+#   vibe-local -y                 # パーミッション確認スキップ (自己責任)
 
 set -euo pipefail
 
 # --- ディレクトリ初期化 ---
-STATE_DIR="${HOME}/.local/state/claude-local"
+STATE_DIR="${HOME}/.local/state/vibe-local"
 mkdir -p "$STATE_DIR"
 chmod 700 "$STATE_DIR"
 
 # --- 設定読み込み (安全なパーサー) ---
-CONFIG_FILE="${HOME}/.config/claude-local/config"
-PROXY_LIB_DIR="${HOME}/.local/lib/claude-local"
+CONFIG_FILE="${HOME}/.config/vibe-local/config"
+PROXY_LIB_DIR="${HOME}/.local/lib/vibe-local"
 PROXY_SCRIPT="${PROXY_LIB_DIR}/anthropic-ollama-proxy.py"
 
 # デフォルト値
@@ -231,7 +231,7 @@ else
     echo " ⚠️  パーミッション確認 / Permission Check"
     echo "============================================"
     echo ""
-    echo " claude-local はツール自動許可モード"
+    echo " vibe-local はツール自動許可モード"
     echo " (--dangerously-skip-permissions) で起動できます。"
     echo ""
     echo " This means the AI can execute commands, read/write"

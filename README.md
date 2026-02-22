@@ -1,12 +1,12 @@
-# 🤖⚡ ＣＬＡＵＤＥ  ＬＯＣＡＬ ⚡🤖
+# 🤖⚡ Ｖ Ｉ Ｂ Ｅ  Ｌ Ｏ Ｃ Ａ Ｌ ⚡🤖
 
 ```
-     ██████╗██╗      █████╗ ██╗   ██╗██████╗ ███████╗
-    ██╔════╝██║     ██╔══██╗██║   ██║██╔══██╗██╔════╝
-    ██║     ██║     ███████║██║   ██║██║  ██║█████╗
-    ██║     ██║     ██╔══██║██║   ██║██║  ██║██╔══╝
-    ╚██████╗███████╗██║  ██║╚██████╔╝██████╔╝███████╗
-     ╚═════╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝
+    ██╗   ██╗██╗██████╗ ███████╗
+    ██║   ██║██║██╔══██╗██╔════╝
+    ██║   ██║██║██████╔╝█████╗
+    ╚██╗ ██╔╝██║██╔══██╗██╔══╝
+     ╚████╔╝ ██║██████╔╝███████╗
+      ╚═══╝  ╚═╝╚═════╝ ╚══════╝
               ██╗      ██████╗  ██████╗ █████╗ ██╗
               ██║     ██╔═══██╗██╔════╝██╔══██╗██║
               ██║     ██║   ██║██║     ███████║██║
@@ -35,29 +35,29 @@ MacにコマンドをコピペするだけでAIがコードを書いてくれる
 **2.** 以下をコピペしてEnter:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ochyai/claude-local/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ochyai/vibe-local/main/install.sh | bash
 ```
 
 **3.** 新しいターミナルを開いて起動:
 
 ```bash
-claude-local
+vibe-local
 ```
 
 ### 使い方
 
 ```bash
 # 対話モード（AIと会話しながらコーディング）
-claude-local
+vibe-local
 
 # ワンショット（1回だけ質問）
-claude-local -p "Pythonでじゃんけんゲーム作って"
+vibe-local -p "Pythonでじゃんけんゲーム作って"
 
 # ネットワーク自動判定（ネットがあればClaude API、なければローカル）
-claude-local --auto
+vibe-local --auto
 
 # モデルを手動指定
-claude-local --model qwen3:8b
+vibe-local --model qwen3:8b
 ```
 
 ### 対応環境
@@ -93,7 +93,7 @@ npm install -g @anthropic-ai/claude-code
 
 **モデルを変更したい**
 ```bash
-nano ~/.config/claude-local/config
+nano ~/.config/vibe-local/config
 # MODEL="qwen3:8b" を変更
 ```
 
@@ -115,29 +115,29 @@ No network required. Completely free. Uses Ollama + local LLM with the Claude Co
 **2.** Paste and hit Enter:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ochyai/claude-local/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ochyai/vibe-local/main/install.sh | bash
 ```
 
 **3.** Open a new terminal and run:
 
 ```bash
-claude-local
+vibe-local
 ```
 
 ### Usage
 
 ```bash
 # Interactive mode (chat with AI while coding)
-claude-local
+vibe-local
 
 # One-shot (ask once)
-claude-local -p "Create a snake game in Python"
+vibe-local -p "Create a snake game in Python"
 
 # Auto-detect network (uses Claude API if online, local if offline)
-claude-local --auto
+vibe-local --auto
 
 # Specify model manually
-claude-local --model qwen3:8b
+vibe-local --model qwen3:8b
 ```
 
 ### Supported Environments
@@ -173,7 +173,7 @@ npm install -g @anthropic-ai/claude-code
 
 **Change model**
 ```bash
-nano ~/.config/claude-local/config
+nano ~/.config/vibe-local/config
 # Change MODEL="qwen3:8b"
 ```
 
@@ -195,29 +195,29 @@ nano ~/.config/claude-local/config
 **2.** 粘贴以下命令并按回车：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ochyai/claude-local/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ochyai/vibe-local/main/install.sh | bash
 ```
 
 **3.** 打开新终端并运行：
 
 ```bash
-claude-local
+vibe-local
 ```
 
 ### 使用方法
 
 ```bash
 # 交互模式（与AI对话编程）
-claude-local
+vibe-local
 
 # 单次执行（只问一次）
-claude-local -p "用Python写一个贪吃蛇游戏"
+vibe-local -p "用Python写一个贪吃蛇游戏"
 
 # 自动检测网络（有网用Claude API，没网用本地）
-claude-local --auto
+vibe-local --auto
 
 # 手动指定模型
-claude-local --model qwen3:8b
+vibe-local --model qwen3:8b
 ```
 
 ### 支持的环境
@@ -253,7 +253,7 @@ npm install -g @anthropic-ai/claude-code
 
 **更换模型**
 ```bash
-nano ~/.config/claude-local/config
+nano ~/.config/vibe-local/config
 # 修改 MODEL="qwen3:8b"
 ```
 
@@ -266,7 +266,7 @@ nano ~/.config/claude-local/config
 ```
 User
   ↓
-claude-local (launch script)
+vibe-local (launch script)
   ↓
 Claude Code CLI (UI + agent features)
   ↓
@@ -283,7 +283,7 @@ qwen3-coder:30b (AI model)
 
 > **このツールは自己責任でご利用ください。**
 
-`claude-local` は初回起動時に **ツール自動許可モード** (`--dangerously-skip-permissions`) を使うか確認します。
+`vibe-local` は初回起動時に **ツール自動許可モード** (`--dangerously-skip-permissions`) を使うか確認します。
 自動許可モードを選ぶと、AIがファイルの読み書き・コマンド実行・システム操作を **確認なしで** 実行します。
 
 - ローカルLLMはクラウドAI (Claude) より **精度が低い** ため、意図しない操作が実行される可能性があります
@@ -292,15 +292,15 @@ qwen3-coder:30b (AI model)
 - `-y` フラグで確認をスキップできますが、リスクを理解した上でご利用ください
 
 ```bash
-claude-local        # 毎回パーミッション確認あり（初回に選択）
-claude-local -y     # 確認スキップ（自動許可モード）
+vibe-local        # 毎回パーミッション確認あり（初回に選択）
+vibe-local -y     # 確認スキップ（自動許可モード）
 ```
 
 ### 🇺🇸 English
 
 > **Use this tool at your own risk.**
 
-On first launch, `claude-local` asks whether to enable **auto-approve mode** (`--dangerously-skip-permissions`).
+On first launch, `vibe-local` asks whether to enable **auto-approve mode** (`--dangerously-skip-permissions`).
 In auto-approve mode, the AI can read/write files, execute commands, and modify your system **without asking**.
 
 - Local LLMs are **less accurate** than cloud AI (Claude), so unintended actions may occur
@@ -309,15 +309,15 @@ In auto-approve mode, the AI can read/write files, execute commands, and modify 
 - The `-y` flag skips the prompt — only use it if you understand the risks
 
 ```bash
-claude-local        # Permission check on first launch
-claude-local -y     # Skip check (auto-approve mode)
+vibe-local        # Permission check on first launch
+vibe-local -y     # Skip check (auto-approve mode)
 ```
 
 ### 🇨🇳 中文
 
 > **使用本工具风险自负。**
 
-首次启动时，`claude-local` 会询问是否启用 **工具自动批准模式** (`--dangerously-skip-permissions`)。
+首次启动时，`vibe-local` 会询问是否启用 **工具自动批准模式** (`--dangerously-skip-permissions`)。
 在自动批准模式下，AI可以读写文件、执行命令、修改系统，**无需确认**。
 
 - 本地LLM的精度 **低于** 云端AI (Claude)，可能执行非预期操作
@@ -326,8 +326,8 @@ claude-local -y     # Skip check (auto-approve mode)
 - `-y` 参数跳过确认 - 请在理解风险后使用
 
 ```bash
-claude-local        # 首次启动时确认权限
-claude-local -y     # 跳过确认（自动批准模式）
+vibe-local        # 首次启动时确认权限
+vibe-local -y     # 跳过确认（自动批准模式）
 ```
 
 ---
@@ -336,7 +336,7 @@ claude-local -y     # 跳过确认（自动批准模式）
 
 - Local LLM accuracy is lower than Claude API
 - First model download takes time (several GB to 20GB)
-- Use `claude-local --auto` to auto-switch to Claude API when online
+- Use `vibe-local --auto` to auto-switch to Claude API when online
 
 ---
 

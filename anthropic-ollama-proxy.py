@@ -21,7 +21,7 @@ import traceback
 OLLAMA_BASE = "http://localhost:11434"
 PROXY_PORT = 8082
 # [H3/L4 fix] Log to user-private directory with restricted permissions
-LOG_DIR = os.path.join(os.path.expanduser("~"), ".local", "state", "claude-local", "proxy-debug")
+LOG_DIR = os.path.join(os.path.expanduser("~"), ".local", "state", "vibe-local", "proxy-debug")
 os.makedirs(LOG_DIR, mode=0o700, exist_ok=True)
 
 # === Optimization settings for local LLM ===

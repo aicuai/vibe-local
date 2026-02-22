@@ -1,10 +1,10 @@
 #!/bin/bash
-# claude-local installer
+# vibe-local installer
 # ✨🌴 Ｖ Ａ Ｐ Ｏ Ｒ Ｗ Ａ Ｖ Ｅ   ＩＮＳＴＡＬＬＥＲ 🌴✨
 # Trilingual: 日本語 / English / 中文
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/ochyai/claude-local/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/ochyai/vibe-local/main/install.sh | bash
 #   bash install.sh
 #   bash install.sh --model qwen3:8b
 #   bash install.sh --lang en
@@ -134,7 +134,7 @@ MSG_ja_settings="設定:"
 MSG_ja_label_model="モデル"
 MSG_ja_label_config="設定"
 MSG_ja_label_command="コマンド"
-MSG_ja_reopen="新しいターミナルを開いてから claude-local を実行"
+MSG_ja_reopen="新しいターミナルを開いてから vibe-local を実行"
 MSG_ja_enjoy="🌴  無 料 Ａ Ｉ コ ー デ ィ ン グ を 楽 し も う  🌴"
 MSG_ja_help_usage="Usage: install.sh [--model MODEL_NAME] [--lang LANG]"
 MSG_ja_help_model="使用するOllamaモデルを指定 (例: qwen3:8b)"
@@ -207,7 +207,7 @@ MSG_en_settings="Settings:"
 MSG_en_label_model="Model"
 MSG_en_label_config="Config"
 MSG_en_label_command="Command"
-MSG_en_reopen="Open a new terminal, then run claude-local"
+MSG_en_reopen="Open a new terminal, then run vibe-local"
 MSG_en_enjoy="🌴  Ｅ Ｎ Ｊ Ｏ Ｙ  Ｆ Ｒ Ｅ Ｅ  Ａ Ｉ  Ｃ Ｏ Ｄ Ｉ Ｎ Ｇ  🌴"
 MSG_en_help_usage="Usage: install.sh [--model MODEL_NAME] [--lang LANG]"
 MSG_en_help_model="Specify Ollama model (e.g. qwen3:8b)"
@@ -280,7 +280,7 @@ MSG_zh_settings="设置:"
 MSG_zh_label_model="模型"
 MSG_zh_label_config="配置"
 MSG_zh_label_command="命令"
-MSG_zh_reopen="打开新终端后运行 claude-local"
+MSG_zh_reopen="打开新终端后运行 vibe-local"
 MSG_zh_enjoy="🌴  享 受 免 费 Ａ Ｉ 编 程  🌴"
 MSG_zh_help_usage="Usage: install.sh [--model MODEL_NAME] [--lang LANG]"
 MSG_zh_help_model="指定Ollama模型 (例: qwen3:8b)"
@@ -430,12 +430,12 @@ echo -e "  ${PINK}💜${MAGENTA}💜${PURPLE}💜${CYAN}💜${AQUA}💜${MINT}�
 echo ""
 echo -e "${MAGENTA}${BOLD}"
 cat << 'LOGO'
-     ██████╗██╗      █████╗ ██╗   ██╗██████╗ ███████╗
-    ██╔════╝██║     ██╔══██╗██║   ██║██╔══██╗██╔════╝
-    ██║     ██║     ███████║██║   ██║██║  ██║█████╗
-    ██║     ██║     ██╔══██║██║   ██║██║  ██║██╔══╝
-    ╚██████╗███████╗██║  ██║╚██████╔╝██████╔╝███████╗
-     ╚═════╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝
+    ██╗   ██╗██╗██████╗ ███████╗
+    ██║   ██║██║██╔══██╗██╔════╝
+    ██║   ██║██║██████╔╝█████╗
+    ╚██╗ ██╔╝██║██╔══██╗██╔══╝
+     ╚████╔╝ ██║██████╔╝███████╗
+      ╚═══╝  ╚═╝╚═════╝ ╚══════╝
 LOGO
 echo -e "${NC}${CYAN}${BOLD}"
 cat << 'LOGO2'
@@ -671,7 +671,7 @@ fi
 # =============================================
 step_header 5 "$(msg step5)"
 
-LIB_DIR="${HOME}/.local/lib/claude-local"
+LIB_DIR="${HOME}/.local/lib/vibe-local"
 BIN_DIR="${HOME}/.local/bin"
 
 mkdir -p "$LIB_DIR"
@@ -684,24 +684,24 @@ vaporwave_progress "$(msg file_deploy)" 1.5
 if [ -n "$SCRIPT_DIR" ] && [ -f "${SCRIPT_DIR}/anthropic-ollama-proxy.py" ]; then
     vapor_info "$(msg source_local)"
     cp "${SCRIPT_DIR}/anthropic-ollama-proxy.py" "$LIB_DIR/"
-    cp "${SCRIPT_DIR}/claude-local.sh" "$BIN_DIR/claude-local"
+    cp "${SCRIPT_DIR}/vibe-local.sh" "$BIN_DIR/vibe-local"
 else
-    REPO_RAW="https://raw.githubusercontent.com/ochyai/claude-local/main"
+    REPO_RAW="https://raw.githubusercontent.com/ochyai/vibe-local/main"
     vapor_info "$(msg source_github)"
     curl -fsSL "${REPO_RAW}/anthropic-ollama-proxy.py" -o "$LIB_DIR/anthropic-ollama-proxy.py"
-    curl -fsSL "${REPO_RAW}/claude-local.sh" -o "$BIN_DIR/claude-local"
+    curl -fsSL "${REPO_RAW}/vibe-local.sh" -o "$BIN_DIR/vibe-local"
 fi
 
-chmod +x "$BIN_DIR/claude-local"
+chmod +x "$BIN_DIR/vibe-local"
 vapor_success "Proxy → $LIB_DIR/"
-vapor_success "Command → $BIN_DIR/claude-local"
+vapor_success "Command → $BIN_DIR/vibe-local"
 
 # =============================================
 # Step 6: 設定ファイル生成
 # =============================================
 step_header 6 "$(msg step6)"
 
-CONFIG_DIR="${HOME}/.config/claude-local"
+CONFIG_DIR="${HOME}/.config/vibe-local"
 CONFIG_FILE="${CONFIG_DIR}/config"
 
 mkdir -p "$CONFIG_DIR"
@@ -712,7 +712,7 @@ if [ -f "$CONFIG_FILE" ]; then
     vapor_warn "$(msg config_exists)"
 else
     cat > "$CONFIG_FILE" << EOF
-# claude-local config
+# vibe-local config
 # Auto-generated: $(date '+%Y-%m-%d %H:%M:%S')
 
 MODEL="$MODEL"
@@ -738,7 +738,7 @@ if [ "$BIN_IN_PATH" -eq 0 ]; then
     if [ -n "$SHELL_RC" ]; then
         if ! grep -q '\.local/bin' "$SHELL_RC" 2>/dev/null; then
             echo '' >> "$SHELL_RC"
-            echo '# claude-local' >> "$SHELL_RC"
+            echo '# vibe-local' >> "$SHELL_RC"
             echo 'export PATH="${HOME}/.local/bin:${PATH}"' >> "$SHELL_RC"
             vapor_success "$(msg path_added) → $SHELL_RC"
         else
@@ -763,7 +763,7 @@ else
     vapor_warn "Ollama Server       → 🟡 $(msg standby)"
 fi
 
-TEST_STATE_DIR="${HOME}/.local/state/claude-local"
+TEST_STATE_DIR="${HOME}/.local/state/vibe-local"
 mkdir -p "$TEST_STATE_DIR" && chmod 700 "$TEST_STATE_DIR"
 python3 "$LIB_DIR/anthropic-ollama-proxy.py" 8083 &>"${TEST_STATE_DIR}/test-proxy.log" &
 TEST_PID=$!
@@ -827,16 +827,16 @@ rainbow_text "    ════════════════════�
 echo ""
 echo -e "    ${BOLD}${WHITE}🚀 $(msg usage)${NC}"
 echo ""
-echo -e "    ${PINK}❯${NC} ${BOLD}${CYAN}claude-local${NC}                     ${DIM}$(msg mode_interactive)${NC}"
-echo -e "    ${PINK}❯${NC} ${BOLD}${CYAN}claude-local -p \"...\"${NC}            ${DIM}$(msg mode_oneshot)${NC}"
-echo -e "    ${PINK}❯${NC} ${BOLD}${CYAN}claude-local --auto${NC}              ${DIM}$(msg mode_auto)${NC}"
+echo -e "    ${PINK}❯${NC} ${BOLD}${CYAN}vibe-local${NC}                     ${DIM}$(msg mode_interactive)${NC}"
+echo -e "    ${PINK}❯${NC} ${BOLD}${CYAN}vibe-local -p \"...\"${NC}            ${DIM}$(msg mode_oneshot)${NC}"
+echo -e "    ${PINK}❯${NC} ${BOLD}${CYAN}vibe-local --auto${NC}              ${DIM}$(msg mode_auto)${NC}"
 echo ""
 rainbow_text "    ═══════════════════════════════════════════════════════"
 echo ""
 echo -e "    ${BOLD}${WHITE}⚙️  $(msg settings)${NC}"
 echo -e "    ${PURPLE}┃${NC} $(msg label_model):     ${BOLD}${NEON_GREEN}$MODEL${NC}"
 echo -e "    ${PURPLE}┃${NC} $(msg label_config):       ${AQUA}$CONFIG_FILE${NC}"
-echo -e "    ${PURPLE}┃${NC} $(msg label_command):   ${AQUA}$BIN_DIR/claude-local${NC}"
+echo -e "    ${PURPLE}┃${NC} $(msg label_command):   ${AQUA}$BIN_DIR/vibe-local${NC}"
 echo ""
 rainbow_text "    ═══════════════════════════════════════════════════════"
 echo ""
