@@ -1,4 +1,4 @@
-# install.ps1
+﻿# install.ps1
 # vibe-local Windows installer
 # Vaporwave aesthetic installer for Windows
 #
@@ -325,7 +325,7 @@ function Run-WithSpinner {
 # ║  🌅  ＴＩＴＬＥ  ＳＣＲＥＥＮ                              ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-Clear-Host
+try { Clear-Host } catch { Write-Host "" }
 Write-Host ""
 Write-Host "  ${PINK}##${MAGENTA}##${PURPLE}##${CYAN}##${AQUA}##${MINT}##${NEON_GREEN}##${YELLOW}##${ORANGE}##${CORAL}##${HOT_PINK}##${PINK}##${MAGENTA}##${PURPLE}##${CYAN}##${AQUA}##${NC}"
 Write-Host ""
@@ -474,7 +474,24 @@ if (-not $PythonCmd) {
 }
 
 # --- Ollama ---
-if (Get-Command ollama -ErrorAction SilentlyContinue) {
+# Check PATH first, then common install locations (Ollama GUI installer doesn't always add to PATH)
+$ollamaFound = Get-Command ollama -ErrorAction SilentlyContinue
+if (-not $ollamaFound) {
+    $ollamaSearchPaths = @(
+        "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe",
+        "$env:ProgramFiles\Ollama\ollama.exe",
+        "${env:ProgramFiles(x86)}\Ollama\ollama.exe"
+    )
+    foreach ($op in $ollamaSearchPaths) {
+        if (Test-Path $op) {
+            $ollamaDir = Split-Path $op
+            $env:PATH = "$ollamaDir;$env:PATH"
+            $ollamaFound = Get-Command ollama -ErrorAction SilentlyContinue
+            break
+        }
+    }
+}
+if ($ollamaFound) {
     $ollamaVer = ollama --version 2>&1
     Vapor-Success "Ollama $(msg 'installed') ($ollamaVer)"
 } else {
@@ -482,6 +499,8 @@ if (Get-Command ollama -ErrorAction SilentlyContinue) {
     try {
         winget install -e --id Ollama.Ollama --accept-source-agreements --accept-package-agreements 2>&1 | Out-Null
         Vapor-Success "Ollama $(msg 'install_done')"
+        # Refresh PATH to find newly installed Ollama
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
     } catch {
         Vapor-Error "Ollama $(msg 'install_fail')"
         Vapor-Warn "$(msg 'install_fail_hint'): winget install Ollama.Ollama"
@@ -512,24 +531,36 @@ try {
 # Ensure Ollama is running
 $ollamaRunning = $false
 try {
-    $null = Invoke-RestMethod -Uri "http://localhost:11434/api/tags" -TimeoutSec 2 -ErrorAction Stop
-    $ollamaRunning = $true
+    # PS 5.1 needs ~2s for first .NET HTTP call; use 5s timeout to avoid false negatives
+    $resp = Invoke-WebRequest -Uri "http://localhost:11434/api/tags" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
+    $ollamaRunning = ($resp.StatusCode -eq 200)
 } catch {}
 
 if (-not $ollamaRunning) {
     Vapor-Info (msg 'ollama_starting')
-    try {
-        Start-Process ollama -ArgumentList "serve" -WindowStyle Hidden
-    } catch {
-        Vapor-Warn "Could not start Ollama automatically"
+    # Try to start Ollama: first as a process, then restart the Windows service
+    $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
+    if ($ollamaCmd) {
+        try {
+            Start-Process ollama -ArgumentList "serve" -WindowStyle Hidden
+        } catch {
+            Vapor-Warn "Could not start Ollama process"
+        }
+    } else {
+        # Ollama might be installed as a Windows service
+        try {
+            Restart-Service "Ollama" -ErrorAction Stop
+        } catch {
+            Vapor-Warn "Could not start Ollama automatically"
+        }
     }
 
     for ($i = 1; $i -le 30; $i++) {
         Write-Host "`r  $(msg 'ollama_wait')... ${i}s " -NoNewline
         Start-Sleep -Seconds 1
         try {
-            $null = Invoke-RestMethod -Uri "http://localhost:11434/api/tags" -TimeoutSec 2 -ErrorAction Stop
-            $ollamaRunning = $true
+            $resp = Invoke-WebRequest -Uri "http://localhost:11434/api/tags" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
+            $ollamaRunning = ($resp.StatusCode -eq 200)
             break
         } catch {}
     }
@@ -552,7 +583,8 @@ if (-not $ollamaRunning) {
 function Download-Model {
     param([string]$modelName, [string]$label = "")
     try {
-        $tags = Invoke-RestMethod -Uri "http://localhost:11434/api/tags" -TimeoutSec 5
+        $resp = Invoke-WebRequest -Uri "http://localhost:11434/api/tags" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
+        $tags = $resp.Content | ConvertFrom-Json
         $found = $tags.models | Where-Object { $_.name -eq $modelName }
         if ($found) {
             Vapor-Success "$modelName $(msg 'model_downloaded') $label"
@@ -571,7 +603,8 @@ function Download-Model {
     Write-Host ""
 
     try {
-        $tags2 = Invoke-RestMethod -Uri "http://localhost:11434/api/tags" -TimeoutSec 5
+        $resp2 = Invoke-WebRequest -Uri "http://localhost:11434/api/tags" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
+        $tags2 = $resp2.Content | ConvertFrom-Json
         $found2 = $tags2.models | Where-Object { $_.name -eq $modelName }
         if ($found2) {
             Vapor-Success "$modelName $(msg 'model_dl_done') $label"
@@ -703,7 +736,7 @@ Write-Host ""
 
 # Ollama
 try {
-    $null = Invoke-RestMethod -Uri "http://localhost:11434/api/tags" -TimeoutSec 2 -ErrorAction Stop
+    $resp = Invoke-WebRequest -Uri "http://localhost:11434/api/tags" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
     Vapor-Success "Ollama Server       -> $(msg 'online')"
 } catch {
     Vapor-Warn "Ollama Server       -> $(msg 'standby')"
@@ -738,7 +771,8 @@ if (Get-Command claude -ErrorAction SilentlyContinue) {
 
 # Model check
 try {
-    $tags = Invoke-RestMethod -Uri "http://localhost:11434/api/tags" -TimeoutSec 5
+    $resp = Invoke-WebRequest -Uri "http://localhost:11434/api/tags" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
+    $tags = $resp.Content | ConvertFrom-Json
     $found = $tags.models | Where-Object { $_.name -eq $SelectedModel }
     if ($found) {
         Vapor-Success "AI Model ($SelectedModel) -> $(msg 'loaded')"
