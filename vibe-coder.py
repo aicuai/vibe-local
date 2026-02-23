@@ -4265,7 +4265,8 @@ class TUI:
         # C4: Stop any existing spinner before starting new one
         self.stop_spinner()
         self._spinner_stop.clear()
-        frames = ["◜", "◠", "◝", "◞", "◡", "◟"]
+        # Use ASCII spinner frames when colors are disabled (screen readers, dumb terminals)
+        frames = ["|", "/", "-", "\\"] if not C._enabled else ["◜", "◠", "◝", "◞", "◡", "◟"]
         colors = [_ansi("\033[38;5;51m"), _ansi("\033[38;5;87m"), _ansi("\033[38;5;123m"),
                   _ansi("\033[38;5;159m"), _ansi("\033[38;5;123m"), _ansi("\033[38;5;87m")]
         clear_len = len(label) + 10  # enough to clear the spinner line

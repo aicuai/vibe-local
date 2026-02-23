@@ -44,18 +44,32 @@ if [ -f "$CONFIG_FILE" ]; then
     [ -n "$_s" ] && SIDECAR_MODEL="$_s"
     [ -n "$_h" ] && OLLAMA_HOST="$_h"
     [ -n "$_d" ] && VIBE_LOCAL_DEBUG="$_d"
-    unset _val _m _s _h _d
+    unset -f _val
+    unset _m _s _h _d
 fi
 
 # [SEC] Validate OLLAMA_HOST - only allow localhost (SSRF prevention)
-case "$OLLAMA_HOST" in
-    http://localhost:*|http://127.0.0.1:*|http://\[::1\]:*)
-        ;; # allowed
-    *)
-        echo "⚠️  OLLAMA_HOST='$OLLAMA_HOST' はlocalhostではありません。セキュリティのためlocalhostにリセットします。"
-        OLLAMA_HOST="http://localhost:11434"
-        ;;
-esac
+# Strict regex: reject @-credential injection (e.g. http://localhost:11434@attacker.com)
+_host_valid=0
+if [[ "$OLLAMA_HOST" =~ ^http://(localhost|127\.0\.0\.1|\[::1\]):[0-9]{1,5}(/.*)?$ ]]; then
+    [[ "$OLLAMA_HOST" != *@* ]] && _host_valid=1
+fi
+if [ "$_host_valid" -eq 0 ]; then
+    echo "⚠️  OLLAMA_HOST='$OLLAMA_HOST' はlocalhostではありません。セキュリティのためlocalhostにリセットします。"
+    OLLAMA_HOST="http://localhost:11434"
+fi
+unset _host_valid
+
+# --- python3 存在確認 ---
+if ! command -v python3 &>/dev/null; then
+    echo "❌ エラー: python3 が見つかりません"
+    echo ""
+    echo "インストール方法:"
+    echo "  macOS: brew install python3"
+    echo "  Ubuntu/Debian: sudo apt-get install python3"
+    echo "  Fedora: sudo dnf install python3"
+    exit 1
+fi
 
 # --- vibe-coder.py の探索 ---
 if [ ! -f "$VIBE_CODER_SCRIPT" ]; then
@@ -155,7 +169,9 @@ if [ "$AUTO_MODE" -eq 1 ]; then
         # Check if claude CLI exists
         if command -v claude &>/dev/null; then
             echo "🌐 ネットワーク接続あり + Claude Code あり → Claude Code を起動"
-            exec claude ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
+            _claude_args=()
+            [ "$YES_FLAG" -eq 1 ] && _claude_args+=(--dangerously-skip-permissions)
+            exec claude ${_claude_args[@]+"${_claude_args[@]}"} ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
         fi
         echo "🌐 ネットワーク接続あり (Claude Code なし) → ローカルモードで起動"
     else
@@ -183,16 +199,15 @@ if [ -n "$MODEL" ]; then
     _api_response="$(curl -s "$OLLAMA_HOST/api/tags" 2>/dev/null)"
     if [ -n "$_api_response" ]; then
         # Try Python JSON parsing for exact match
-        if echo "$_api_response" | python3 -c "
-import sys,json
+        # [SEC] Pass MODEL via env var, not interpolation (prevents injection)
+        if echo "$_api_response" | TARGET_MODEL="$MODEL" python3 -c "
+import sys,json,os
 try:
     d=json.load(sys.stdin)
     names=[m['name'].strip() for m in d.get('models',[])]
-    want='$MODEL'.strip()
-    # Match exact, with :latest suffix, or prefix match
+    want=os.environ['TARGET_MODEL'].strip()
     found = want in names or want+':latest' in names
     found = found or any(n.startswith(want+':') or n.startswith(want+'-') or n==want for n in names)
-    # Also check without tag (e.g. 'qwen3-coder:30b' matches 'qwen3-coder:30b')
     want_base = want.split(':')[0] if ':' in want else want
     found = found or any(n.split(':')[0] == want_base for n in names)
     sys.exit(0 if found else 1)
@@ -265,7 +280,7 @@ else
 fi
 
 DEBUG_ARGS=()
-if [ "$VIBE_LOCAL_DEBUG" -eq 1 ]; then
+if [ "$VIBE_LOCAL_DEBUG" = "1" ] || [ "$VIBE_LOCAL_DEBUG" = "true" ]; then
     DEBUG_ARGS+=(--debug)
 fi
 
