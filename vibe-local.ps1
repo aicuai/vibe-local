@@ -23,6 +23,14 @@ param(
 
 $ErrorActionPreference = "Continue"
 
+# --- UTF-8 encoding fix (PowerShell 文字化け対策) ---
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    [Console]::InputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+    $null = & cmd /c "chcp 65001 >nul 2>&1"
+} catch {}
+
 # --- Directory init ---
 $StateDir = Join-Path $env:LOCALAPPDATA "vibe-local"
 if (-not (Test-Path $StateDir)) { New-Item -ItemType Directory -Path $StateDir -Force | Out-Null }
@@ -273,6 +281,8 @@ try {
     $env:VIBE_LOCAL_MODEL = $CfgModel
     $env:VIBE_LOCAL_SIDECAR_MODEL = if ($SidecarModel) { $SidecarModel } else { "" }
     $env:VIBE_LOCAL_DEBUG = "$VibeLocalDebug"
+    $env:PYTHONIOENCODING = "utf-8"
+    $env:PYTHONUTF8 = "1"
 
     $allArgs = $ModelArgs + $PermArgs + $DebugArgs + $ExtraArgs
 
@@ -289,4 +299,6 @@ finally {
     Remove-Item Env:VIBE_LOCAL_MODEL -ErrorAction SilentlyContinue
     Remove-Item Env:VIBE_LOCAL_SIDECAR_MODEL -ErrorAction SilentlyContinue
     Remove-Item Env:VIBE_LOCAL_DEBUG -ErrorAction SilentlyContinue
+    Remove-Item Env:PYTHONIOENCODING -ErrorAction SilentlyContinue
+    Remove-Item Env:PYTHONUTF8 -ErrorAction SilentlyContinue
 }

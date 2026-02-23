@@ -16,6 +16,18 @@ param(
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"  # Speed up Invoke-WebRequest
 
+# --- UTF-8 encoding fix (PowerShell 文字化け対策) ---
+# Force UTF-8 for console output (Japanese/CJK characters)
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    [Console]::InputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+    # chcp 65001 equivalent — switch console code page to UTF-8
+    $null = & cmd /c "chcp 65001 >nul 2>&1"
+} catch {
+    # Older PowerShell versions may not support this — continue anyway
+}
+
 # ╔══════════════════════════════════════════════════════════════╗
 # ║  🎨  Ｖ Ａ Ｐ Ｏ Ｒ Ｗ Ａ Ｖ Ｅ   Ｃ Ｏ Ｌ Ｏ Ｒ Ｓ    ║
 # ╚══════════════════════════════════════════════════════════════╝
@@ -325,7 +337,8 @@ function Run-WithSpinner {
 # ║  🌅  ＴＩＴＬＥ  ＳＣＲＥＥＮ                              ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-Clear-Host
+# [UX] Don't Clear-Host — preserve terminal history so users can scroll back
+Write-Host ""
 Write-Host ""
 Write-Host "  ${PINK}##${MAGENTA}##${PURPLE}##${CYAN}##${AQUA}##${MINT}##${NEON_GREEN}##${YELLOW}##${ORANGE}##${CORAL}##${HOT_PINK}##${PINK}##${MAGENTA}##${PURPLE}##${CYAN}##${AQUA}##${NC}"
 Write-Host ""
@@ -442,25 +455,52 @@ if ($PythonCmd) {
     Vapor-Success "Python $(msg 'installed') ($pyVer)"
 } else {
     Vapor-Info "Python $(msg 'installing')"
-    try {
-        winget install -e --id Python.Python.3.12 --accept-source-agreements --accept-package-agreements 2>&1 | Out-Null
-        Vapor-Success "Python $(msg 'install_done')"
-        # Refresh PATH so newly installed Python is found
-        $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
-        # Try to find the newly installed Python
-        $PythonCmd = $null
-        foreach ($pyCmd in @("py", "python3", "python")) {
-            if (Get-Command $pyCmd -ErrorAction SilentlyContinue) {
-                $PythonCmd = $pyCmd
-                break
+    $pythonInstalled = $false
+
+    # Method 1: Try winget
+    if (-not $pythonInstalled -and (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Vapor-Info "Trying winget..."
+        try {
+            winget install -e --id Python.Python.3.12 --accept-source-agreements --accept-package-agreements 2>&1 | Out-Null
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+            $PythonCmd = $null
+            foreach ($pyCmd in @("py", "python3", "python")) {
+                if (Get-Command $pyCmd -ErrorAction SilentlyContinue) {
+                    $PythonCmd = $pyCmd
+                    $pythonInstalled = $true
+                    break
+                }
             }
-        }
-        if (-not $PythonCmd) {
-            Vapor-Warn "Python installed but not found in PATH. Please restart terminal and re-run installer."
-        }
-    } catch {
+            if ($pythonInstalled) {
+                Vapor-Success "Python $(msg 'install_done') (winget)"
+            }
+        } catch {}
+    }
+
+    # Method 2: Try Microsoft Store python (available without winget)
+    if (-not $pythonInstalled) {
+        Vapor-Info "Trying Microsoft Store Python..."
+        try {
+            # 'python3' command on Windows may trigger Store install
+            $storeResult = & python3 --version 2>&1
+            if ($LASTEXITCODE -eq 0 -and "$storeResult" -match "Python 3") {
+                $PythonCmd = "python3"
+                $pythonInstalled = $true
+                Vapor-Success "Python $(msg 'install_done') (Microsoft Store)"
+            }
+        } catch {}
+    }
+
+    if (-not $pythonInstalled) {
         Vapor-Error "Python $(msg 'install_fail')"
-        Vapor-Warn "$(msg 'install_fail_hint'): winget install Python.Python.3.12"
+        Write-Host ""
+        Write-Host "  ${BOLD}${WHITE}Please install Python manually:${NC}"
+        Write-Host "  ${CYAN}1.${NC} Open: ${BOLD}https://www.python.org/downloads/${NC}"
+        Write-Host "  ${CYAN}2.${NC} Click 'Download Python 3.x.x'"
+        Write-Host "  ${CYAN}3.${NC} ${YELLOW}${BOLD}IMPORTANT:${NC} Check '${BOLD}Add Python to PATH${NC}' at the bottom of the installer"
+        Write-Host "  ${CYAN}4.${NC} Click 'Install Now'"
+        Write-Host "  ${CYAN}5.${NC} After installation, ${BOLD}open a NEW PowerShell window${NC} and re-run this installer"
+        Write-Host ""
     }
 }
 
@@ -479,12 +519,67 @@ if (Get-Command ollama -ErrorAction SilentlyContinue) {
     Vapor-Success "Ollama $(msg 'installed') ($ollamaVer)"
 } else {
     Vapor-Info "Ollama $(msg 'installing')"
-    try {
-        winget install -e --id Ollama.Ollama --accept-source-agreements --accept-package-agreements 2>&1 | Out-Null
-        Vapor-Success "Ollama $(msg 'install_done')"
-    } catch {
+    $ollamaInstalled = $false
+
+    # Method 1: Try winget
+    if (-not $ollamaInstalled -and (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Vapor-Info "Trying winget..."
+        try {
+            $wingetOut = winget install -e --id Ollama.Ollama --accept-source-agreements --accept-package-agreements 2>&1
+            # Refresh PATH after winget install
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+            if (Get-Command ollama -ErrorAction SilentlyContinue) {
+                $ollamaInstalled = $true
+                Vapor-Success "Ollama $(msg 'install_done') (winget)"
+            }
+        } catch {}
+    }
+
+    # Method 2: Direct download from ollama.com
+    if (-not $ollamaInstalled) {
+        Vapor-Info "Downloading Ollama installer directly..."
+        $ollamaSetup = Join-Path $env:TEMP "OllamaSetup.exe"
+        try {
+            Invoke-WebRequest -Uri "https://ollama.com/download/OllamaSetup.exe" -OutFile $ollamaSetup -ErrorAction Stop
+            Vapor-Info "Running OllamaSetup.exe..."
+            Write-Host ""
+            Write-Host "  ${YELLOW}${BOLD}>>> Ollama installer will open. Please follow the installation wizard. <<<${NC}"
+            Write-Host "  ${DIM}${AQUA}    (If a UAC prompt appears, click 'Yes' to allow installation)${NC}"
+            Write-Host ""
+            $proc = Start-Process -FilePath $ollamaSetup -PassThru -Wait
+            # Refresh PATH after installer
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+            # Also check common Ollama install paths
+            $ollamaPaths = @(
+                "$env:LOCALAPPDATA\Programs\Ollama",
+                "$env:ProgramFiles\Ollama",
+                "${env:ProgramFiles(x86)}\Ollama"
+            )
+            foreach ($op in $ollamaPaths) {
+                if ((Test-Path (Join-Path $op "ollama.exe")) -and ($env:Path -notlike "*$op*")) {
+                    $env:Path = "$op;$env:Path"
+                }
+            }
+            if (Get-Command ollama -ErrorAction SilentlyContinue) {
+                $ollamaInstalled = $true
+                Vapor-Success "Ollama $(msg 'install_done') (direct download)"
+            }
+            # Clean up installer
+            Remove-Item $ollamaSetup -Force -ErrorAction SilentlyContinue
+        } catch {
+            Vapor-Warn "Direct download failed: $($_.Exception.Message)"
+        }
+    }
+
+    if (-not $ollamaInstalled) {
         Vapor-Error "Ollama $(msg 'install_fail')"
-        Vapor-Warn "$(msg 'install_fail_hint'): winget install Ollama.Ollama"
+        Write-Host ""
+        Write-Host "  ${BOLD}${WHITE}Please install Ollama manually:${NC}"
+        Write-Host "  ${CYAN}1.${NC} Open: ${BOLD}https://ollama.com/download${NC}"
+        Write-Host "  ${CYAN}2.${NC} Click 'Download for Windows'"
+        Write-Host "  ${CYAN}3.${NC} Run the downloaded OllamaSetup.exe"
+        Write-Host "  ${CYAN}4.${NC} After installation, re-run this installer"
+        Write-Host ""
     }
 }
 
@@ -517,6 +612,15 @@ try {
 } catch {}
 
 if (-not $ollamaRunning) {
+    # Refresh PATH in case Ollama was just installed in Step 3
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+    # Also check common Ollama install paths
+    foreach ($op in @("$env:LOCALAPPDATA\Programs\Ollama", "$env:ProgramFiles\Ollama")) {
+        if ((Test-Path (Join-Path $op "ollama.exe")) -and ($env:Path -notlike "*$op*")) {
+            $env:Path = "$op;$env:Path"
+        }
+    }
+
     Vapor-Info (msg 'ollama_starting')
     try {
         Start-Process ollama -ArgumentList "serve" -WindowStyle Hidden
@@ -539,11 +643,18 @@ if (-not $ollamaRunning) {
         Vapor-Success "Ollama $(msg 'online')"
     } else {
         Vapor-Error "Ollama failed to start after 30 seconds."
-        Write-Host "  Possible causes:"
-        Write-Host "    - Ollama was not installed correctly"
-        Write-Host "    - Another process is using port 11434"
-        Write-Host "  Try: ollama serve (in a separate terminal)"
+        Write-Host ""
+        Write-Host "  ${BOLD}${WHITE}Possible causes:${NC}"
+        Write-Host "  ${CYAN}1.${NC} Ollama was not installed correctly"
+        Write-Host "     -> Reinstall from: ${BOLD}https://ollama.com/download${NC}"
+        Write-Host "  ${CYAN}2.${NC} Another process is using port 11434"
+        Write-Host "     -> Close other Ollama instances"
+        Write-Host "  ${CYAN}3.${NC} Ollama is not in PATH"
+        Write-Host "     -> Restart your terminal after Ollama installation"
+        Write-Host ""
+        Write-Host "  ${YELLOW}Try:${NC} Open a ${BOLD}new${NC} PowerShell window and run: ${BOLD}ollama serve${NC}"
         Write-Host "  Then re-run this installer."
+        Write-Host ""
         exit 1
     }
 }
