@@ -53,8 +53,9 @@ from pathlib import Path
 _bg_tasks = {}
 _bg_task_counter = [0]
 _bg_tasks_lock = threading.Lock()
+MAX_BG_TASKS = 50  # Prevent unbounded memory growth
 
-__version__ = "0.9.1"
+__version__ = "0.9.4"
 
 # ════════════════════════════════════════════════════════════════════════════════
 # ANSI Colors
@@ -341,41 +342,173 @@ class Config:
 
     # Model-specific context window sizes
     MODEL_CONTEXT_SIZES = {
-        "qwen3:1.7b": 4096,
-        "qwen3:4b": 8192,
-        "qwen3:8b": 32768,
+        # Tier S — Frontier (256GB+ RAM)
+        "deepseek-v3:671b": 131072,
+        "deepseek-r1:671b": 131072,
+        # Tier A — Expert (128GB+ RAM)
+        "llama3.1:405b": 131072,
+        "qwen3:235b": 32768,
+        "deepseek-coder-v2:236b": 131072,
+        # Tier B — Advanced (48GB+ RAM)
+        "mixtral:8x22b": 65536,
+        "command-r-plus": 131072,
+        "llama3.3:70b": 131072,
+        "qwen2.5:72b": 131072,
+        "deepseek-r1:70b": 131072,
+        "qwen3:32b": 32768,
+        # Tier C — Solid (16GB+ RAM)
         "qwen3-coder:30b": 32768,
+        "qwen2.5-coder:32b": 32768,
         "qwen3:14b": 32768,
         "qwen3:30b": 32768,
-        "llama3.2:3b": 8192,
+        "starcoder2:15b": 16384,
+        # Tier D — Lightweight (8GB+ RAM)
+        "qwen3:8b": 32768,
         "llama3.1:8b": 8192,
         "codellama:7b": 16384,
         "deepseek-coder:6.7b": 16384,
+        # Tier E — Minimal (4GB+ RAM)
+        "qwen3:4b": 8192,
+        "qwen3:1.7b": 4096,
+        "llama3.2:3b": 8192,
     }
+
+    # Ranked model tiers for auto-detection: (model_name, min_ram_gb, tier_label)
+    # Higher in the list = preferred when available + enough RAM
+    # min_ram_gb = practical minimum for INTERACTIVE use (model + KV cache + OS headroom)
+    #   Rule of thumb: model_file_size * 1.5~2x for comfortable tok/s
+    #   671B models (~404GB) need 768GB+ to avoid swapping and slow generation
+    #   405B models (~243GB) need 512GB+ (borderline on 512GB Mac — user can override)
+    # Coding-focused models are prioritized over general-purpose at same tier
+    MODEL_TIERS = [
+        # Tier S — Frontier: best reasoning, needs dedicated server RAM
+        #   Not auto-selected on typical machines — use MODEL= to force
+        ("deepseek-r1:671b",        768, "S"),
+        ("deepseek-v3:671b",        768, "S"),
+        # Tier A — Expert: excellent coding + reasoning
+        ("qwen3:235b",              256, "A"),
+        ("deepseek-coder-v2:236b",  256, "A"),
+        ("llama3.1:405b",           512, "A"),
+        # Tier B — Advanced: very strong coding, sweet spot for high-RAM machines
+        ("llama3.3:70b",             96, "B"),
+        ("deepseek-r1:70b",          96, "B"),
+        ("qwen2.5:72b",              96, "B"),
+        ("mixtral:8x22b",           128, "B"),
+        ("command-r-plus",           96, "B"),
+        # Tier C — Solid: good balance of speed and quality
+        ("qwen3-coder:30b",          24, "C"),
+        ("qwen2.5-coder:32b",        24, "C"),
+        ("starcoder2:15b",           16, "C"),
+        ("qwen3:14b",                16, "C"),
+        # Tier D — Lightweight: fast, decent quality
+        ("qwen3:8b",                  8, "D"),
+        ("llama3.1:8b",               8, "D"),
+        ("deepseek-coder:6.7b",       8, "D"),
+        ("codellama:7b",              8, "D"),
+        # Tier E — Minimal: runs on anything
+        ("qwen3:4b",                  4, "E"),
+        ("qwen3:1.7b",                2, "E"),
+        ("llama3.2:3b",               4, "E"),
+    ]
+
+    # Sidecar candidates (fast + small, used for context compaction)
+    _SIDECAR_CANDIDATES = ["qwen3:8b", "qwen3:4b", "qwen3:1.7b", "llama3.2:3b"]
 
     def _auto_detect_model(self):
         if self.model:
             # Set appropriate context window for known models
-            if self.context_window == self.DEFAULT_CONTEXT_WINDOW:
-                for name, ctx in self.MODEL_CONTEXT_SIZES.items():
-                    if name in self.model:
-                        self.context_window = ctx
-                        break
+            self._apply_context_window(self.model)
             return
         ram_gb = _get_ram_gb()
+        # Try smart detection: query Ollama for installed models
+        installed = self._query_installed_models()
+        if installed:
+            best = self._pick_best_model(installed, ram_gb)
+            if best:
+                self.model = best
+                self._apply_context_window(best)
+                if not self.sidecar_model:
+                    self._pick_sidecar(installed, best, ram_gb)
+                return
+        # Fallback: RAM-based heuristic (no Ollama connection yet)
         if ram_gb >= 32:
             self.model = "qwen3-coder:30b"
         elif ram_gb >= 16:
             self.model = "qwen3:8b"
-        else:  # < 16 GB RAM
+        else:
             self.model = "qwen3:1.7b"
-            self.context_window = 4096  # small model = small context
-
+            self.context_window = 4096
         if not self.sidecar_model:
             if ram_gb >= 32:
                 self.sidecar_model = "qwen3:8b"
             elif ram_gb >= 16:
                 self.sidecar_model = "qwen3:1.7b"
+
+    def _query_installed_models(self):
+        """Query Ollama API for installed model names. Returns list or empty."""
+        url = f"{self.ollama_host}/api/tags"
+        try:
+            resp = urllib.request.urlopen(url, timeout=3)
+            try:
+                data = json.loads(resp.read(10 * 1024 * 1024))
+            finally:
+                resp.close()
+            return [m["name"].strip() for m in data.get("models", [])]
+        except Exception:
+            return []
+
+    def _pick_best_model(self, installed, ram_gb):
+        """Pick the best installed model that fits in RAM, using tier ranking."""
+        installed_set = set(installed)
+        for model_name, min_ram, _tier in self.MODEL_TIERS:
+            if ram_gb < min_ram:
+                continue
+            # Exact match (e.g. "qwen3:235b" in {"qwen3:235b", ...})
+            if model_name in installed_set:
+                return model_name
+            # Match with :latest suffix (e.g. "command-r-plus" → "command-r-plus:latest")
+            if model_name + ":latest" in installed_set:
+                return model_name + ":latest"
+        return None
+
+    def _pick_sidecar(self, installed, main_model, ram_gb):
+        """Pick a small fast model for context compaction (different from main)."""
+        installed_set = set(installed)
+        for candidate in self._SIDECAR_CANDIDATES:
+            if candidate == main_model:
+                continue
+            if candidate in installed_set:
+                self.sidecar_model = candidate
+                return
+            if candidate + ":latest" in installed_set:
+                self.sidecar_model = candidate + ":latest"
+                return
+        # If nothing suitable, sidecar remains empty (compaction uses main model)
+
+    def _apply_context_window(self, model_name):
+        """Set context window size for a model if not manually overridden."""
+        if self.context_window != self.DEFAULT_CONTEXT_WINDOW:
+            return  # user specified explicitly
+        for name, ctx in self.MODEL_CONTEXT_SIZES.items():
+            if name in model_name or model_name in name:
+                self.context_window = ctx
+                return
+        # For unknown large models, use generous defaults
+        for _m, min_ram, tier in self.MODEL_TIERS:
+            if _m in model_name or model_name in _m:
+                if tier in ("S", "A"):
+                    self.context_window = 65536
+                elif tier == "B":
+                    self.context_window = 65536
+                return
+
+    @classmethod
+    def get_model_tier(cls, model_name):
+        """Get the tier label for a model. Returns (tier, min_ram) or (None, None)."""
+        for name, min_ram, tier in cls.MODEL_TIERS:
+            if name in model_name or model_name.split(":")[0] == name.split(":")[0]:
+                return tier, min_ram
+        return None, None
 
     def _validate_ollama_host(self):
         parsed = urllib.parse.urlparse(self.ollama_host)
@@ -392,10 +525,10 @@ class Config:
                 clean += f":{parsed.port}"
             self.ollama_host = clean
         self.ollama_host = self.ollama_host.rstrip("/")
-        # Validate numeric settings
-        if self.context_window <= 0:
+        # Validate numeric settings with reasonable bounds
+        if self.context_window <= 0 or self.context_window > 1_048_576:
             self.context_window = self.DEFAULT_CONTEXT_WINDOW
-        if self.max_tokens <= 0:
+        if self.max_tokens <= 0 or self.max_tokens > 131_072:
             self.max_tokens = self.DEFAULT_MAX_TOKENS
         if self.temperature < 0 or self.temperature > 2:
             self.temperature = self.DEFAULT_TEMPERATURE
@@ -797,6 +930,8 @@ class OllamaClient:
                 error_body = e.read().decode("utf-8", errors="replace")[:500]
             except Exception:
                 pass
+            finally:
+                e.close()
             if e.code == 404:
                 raise RuntimeError(f"Model '{model}' not found. Run: ollama pull {model}") from e
             elif e.code == 400:
@@ -842,8 +977,13 @@ class OllamaClient:
             while True:
                 try:
                     chunk = resp.read(4096)
-                except Exception:
+                except (ConnectionError, OSError, urllib.error.URLError) as e:
+                    if self.debug:
+                        print(f"\n{C.YELLOW}[debug] SSE stream read error: {e}{C.RESET}",
+                              file=sys.stderr)
                     break
+                except Exception:
+                    break  # Unknown error — stop reading
                 if not chunk:
                     break
                 buf += chunk
@@ -920,6 +1060,9 @@ class OllamaClient:
             tc_id = tc.get("id", f"call_{uuid.uuid4().hex[:8]}")
             name = func.get("name", "")
             raw_args = func.get("arguments", "{}")
+            # Cap argument size to prevent OOM on malformed responses
+            if isinstance(raw_args, str) and len(raw_args) > 102400:  # 100KB
+                raw_args = raw_args[:102400]
             try:
                 args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
                 if not isinstance(args, dict):
@@ -930,7 +1073,7 @@ class OllamaClient:
                     fixed = re.sub(r',\s*}', '}', fixed)
                     fixed = re.sub(r',\s*]', ']', fixed)
                     args = json.loads(fixed)
-                except (json.JSONDecodeError, Exception):
+                except (json.JSONDecodeError, ValueError, TypeError, KeyError):
                     args = {"raw": raw_args}
             tool_calls.append({"id": tc_id, "name": name, "arguments": args})
 
@@ -1131,11 +1274,13 @@ class BashTool(Tool):
             bg_clean_env = self._build_clean_env()
             def _run_bg(tid, cmd, t_s):
                 try:
+                    _bg_pgroup = platform.system() != "Windows"
                     proc = subprocess.Popen(
                         cmd, shell=True, stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                         text=True, encoding="utf-8", errors="replace",
                         cwd=os.getcwd(), env=bg_clean_env,
+                        start_new_session=_bg_pgroup,
                     )
                     stdout, stderr = proc.communicate(timeout=t_s)
                     out = (stdout or "") + ("\n" + stderr if stderr else "")
@@ -1144,17 +1289,37 @@ class BashTool(Tool):
                     if len(out) > 30000:
                         out = out[:15000] + "\n...(truncated)...\n" + out[-15000:]
                 except subprocess.TimeoutExpired:
+                    # Kill entire process group on Unix, then the process itself
+                    if hasattr(os, "killpg"):
+                        try:
+                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        except (OSError, ProcessLookupError):
+                            pass
                     proc.kill()
                     try:
                         proc.wait(timeout=5)
                     except subprocess.TimeoutExpired:
-                        pass
+                        pass  # Process may be truly stuck — OS will reap eventually
                     out = f"Error: background command timed out after {int(t_s)}s"
                 except Exception as e:
                     out = f"Error: {e}"
                 with _bg_tasks_lock:
                     _bg_tasks[tid]["result"] = out.strip() or "(no output)"
             with _bg_tasks_lock:
+                # Evict completed tasks older than 1 hour, then enforce cap
+                now = time.time()
+                stale = [k for k, v in _bg_tasks.items()
+                         if v.get("result") is not None and now - v.get("start", 0) > 3600]
+                for k in stale:
+                    del _bg_tasks[k]
+                if len(_bg_tasks) >= MAX_BG_TASKS:
+                    # Remove oldest completed task
+                    oldest = min((k for k, v in _bg_tasks.items() if v.get("result") is not None),
+                                 key=lambda k: _bg_tasks[k].get("start", 0), default=None)
+                    if oldest:
+                        del _bg_tasks[oldest]
+                    else:
+                        return f"Error: too many background tasks ({MAX_BG_TASKS}). Wait for some to complete."
                 _bg_tasks[task_id] = {"thread": None, "result": None,
                                        "command": command, "start": time.time()}
             t = threading.Thread(target=_run_bg, args=(task_id, command, timeout_s), daemon=True)
@@ -1275,7 +1440,7 @@ class ReadTool(Tool):
         try:
             real_path = os.path.realpath(file_path)
         except (OSError, ValueError):
-            real_path = file_path
+            return f"Error: cannot resolve path: {file_path}"
         if not os.path.exists(real_path):
             return f"Error: file not found: {file_path}"
         if os.path.isdir(real_path):
@@ -1523,10 +1688,15 @@ class WriteTool(Tool):
         try:
             if os.path.islink(file_path):
                 return f"Error: refusing to write through symlink: {file_path}"
+            # For new files: resolve parent dir to prevent symlink escape
+            resolved = os.path.realpath(file_path)
             if os.path.exists(file_path):
-                file_path = os.path.realpath(file_path)
+                file_path = resolved
+            else:
+                # New file: ensure resolved parent matches expected parent
+                file_path = resolved
         except (OSError, ValueError):
-            pass
+            return f"Error: cannot resolve path: {file_path}"
 
         # Block writes to protected config/permission files
         if _is_protected_path(file_path):
@@ -1622,7 +1792,7 @@ class EditTool(Tool):
                 return f"Error: refusing to edit through symlink: {file_path}"
             file_path = os.path.realpath(file_path)
         except (OSError, ValueError):
-            pass
+            return f"Error: cannot resolve path: {file_path}"
 
         # Block edits to protected config/permission files
         if _is_protected_path(file_path):
@@ -1895,15 +2065,15 @@ class GrepTool(Tool):
         case_insensitive = params.get("-i", False)
         output_mode = params.get("output_mode", "files_with_matches")
         try:
-            after = int(params.get("-A", 0))
+            after = min(int(params.get("-A", 0)), 100)
         except (ValueError, TypeError):
             after = 0
         try:
-            before = int(params.get("-B", 0))
+            before = min(int(params.get("-B", 0)), 100)
         except (ValueError, TypeError):
             before = 0
         try:
-            context = int(params.get("-C", 0))
+            context = min(int(params.get("-C", 0)), 100)
         except (ValueError, TypeError):
             context = 0
         try:
@@ -2121,9 +2291,7 @@ class WebFetchTool(Tool):
             # Encode non-ASCII characters in URL path/query (e.g. Japanese search terms)
             url = urllib.parse.quote(url, safe=':/?#[]@!$&\'()*+,;=-._~%')
             req = urllib.request.Request(url, headers={
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                              "AppleWebKit/537.36 (KHTML, like Gecko) "
-                              "Chrome/133.0.0.0 Safari/537.36",
+                "User-Agent": f"vibe-local/{__version__} (+https://github.com/ochyai/vibe-local)",
             })
             resp = opener.open(req, timeout=30)
             try:
@@ -2237,9 +2405,7 @@ class WebSearchTool(Tool):
             _accept_lang = "ko,en;q=0.9"
         search_url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query) + _ddg_locale
         req = urllib.request.Request(search_url, headers={
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                          "AppleWebKit/537.36 (KHTML, like Gecko) "
-                          "Chrome/133.0.0.0 Safari/537.36",
+            "User-Agent": f"vibe-local/{__version__} (+https://github.com/ochyai/vibe-local)",
             "Accept-Language": _accept_lang,
         })
         try:
@@ -2251,8 +2417,12 @@ class WebSearchTool(Tool):
         except Exception as e:
             return f"Web search failed (network error): {e}"
 
-        # Detect CAPTCHA / rate limiting
-        if "robot" in html.lower() or "captcha" in html.lower() or "verify you are human" in html.lower():
+        # Detect CAPTCHA / rate limiting (avoid false positives from <meta name="robots"> or snippet text)
+        _html_low = html.lower()
+        _is_captcha = ("captcha" in _html_low or "verify you are human" in _html_low
+                        or "are you a robot" in _html_low or "unusual traffic" in _html_low)
+        if _is_captcha and 'class="result__a"' not in html:
+            # Only bail if CAPTCHA detected AND no real results present
             return "Web search blocked by CAPTCHA. You may be rate-limited. Try again later or use WebFetch on a specific URL."
 
         results = []
@@ -2633,7 +2803,24 @@ class TaskUpdateTool(Tool):
             if "description" in params and params["description"]:
                 task["description"] = params["description"]
 
+            # Helper: detect cycles via DFS
+            def _has_cycle(start, direction="blocks"):
+                visited = set()
+                stack = [start]
+                while stack:
+                    node = stack.pop()
+                    if node in visited:
+                        continue
+                    visited.add(node)
+                    t = _task_store["tasks"].get(node)
+                    if t:
+                        stack.extend(t.get(direction, []))
+                return visited
+
             for block_id in params.get("addBlocks", []):
+                # Cycle check: if block_id already blocks tid (directly or transitively)
+                if tid in _has_cycle(block_id, "blocks"):
+                    return f"Error: adding block #{block_id} would create a dependency cycle"
                 if block_id not in task["blocks"]:
                     task["blocks"].append(block_id)
                 other = _task_store["tasks"].get(block_id)
@@ -2641,6 +2828,9 @@ class TaskUpdateTool(Tool):
                     other["blockedBy"].append(tid)
 
             for blocker_id in params.get("addBlockedBy", []):
+                # Cycle check: if tid already blocks blocker_id
+                if blocker_id in _has_cycle(tid, "blocks"):
+                    return f"Error: adding blockedBy #{blocker_id} would create a dependency cycle"
                 if blocker_id not in task["blockedBy"]:
                     task["blockedBy"].append(blocker_id)
                 other = _task_store["tasks"].get(blocker_id)
@@ -2931,6 +3121,16 @@ class SubAgentTool(Tool):
                     "tool_call_id": tc_id,
                     "content": output_str,
                 })
+
+            # Context window guard: estimate total message size
+            total_chars = sum(len(str(m.get("content", ""))) for m in messages)
+            max_chars = 80000  # ~20K tokens, safe for most models
+            if total_chars > max_chars:
+                # Truncate older tool results (preserve system + user + last 4 messages)
+                for i in range(2, len(messages) - 4):
+                    c = messages[i].get("content", "")
+                    if messages[i].get("role") == "tool" and isinstance(c, str) and len(c) > 500:
+                        messages[i]["content"] = c[:500] + "\n...(truncated by sub-agent context limit)"
         else:
             # Reached max_turns without a final text response
             result_text = (
@@ -3305,16 +3505,19 @@ class Session:
         tmp = None
         try:
             fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(index, f, ensure_ascii=False, indent=2)
-            os.chmod(tmp, 0o600)  # restrict permissions before exposing
-            os.replace(tmp, path)
-        except (OSError, IOError):
-            if tmp:
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(index, f, ensure_ascii=False, indent=2)
+                os.chmod(tmp, 0o600)  # restrict permissions before exposing
+                os.replace(tmp, path)
+            except Exception:
                 try:
                     os.unlink(tmp)
                 except OSError:
                     pass
+                raise
+        except (OSError, IOError):
+            pass  # non-critical — index will be rebuilt on next save
 
     @staticmethod
     def _cwd_hash(config):
@@ -3635,6 +3838,7 @@ class Session:
             print(f"\n{C.YELLOW}Warning: Session save failed: {e}{C.RESET}", file=sys.stderr)
             if self.config.debug:
                 traceback.print_exc()
+            return  # Don't update project index if session save failed
         # Update project index: map current working directory -> this session
         try:
             cwd_key = Session._cwd_hash(self.config)
@@ -3687,6 +3891,10 @@ class Session:
                             skipped += 1
                     except json.JSONDecodeError:
                         skipped += 1
+                        if self.config.debug:
+                            preview = line[:60] + "..." if len(line) > 60 else line
+                            print(f"{C.DIM}[debug] Corrupt session line {line_num}: {preview}{C.RESET}",
+                                  file=sys.stderr)
                         continue
             if skipped > 0:
                 print(f"{C.YELLOW}Warning: Skipped {skipped} corrupt line(s) in session.{C.RESET}",
@@ -3755,7 +3963,7 @@ class TUI:
                 readline.set_history_length(1000)
                 # Tab-completion for slash commands
                 _slash_commands = [
-                    "/help", "/exit", "/quit", "/q", "/clear", "/model",
+                    "/help", "/exit", "/quit", "/q", "/clear", "/model", "/models",
                     "/status", "/save", "/compact", "/yes", "/no", "/tokens",
                     "/commit", "/diff", "/git", "/plan", "/undo", "/init",
                     "/config", "/debug",
@@ -3830,7 +4038,13 @@ class TUI:
         info_dim = C.DIM
         info_bright = _ansi(chr(27)+"[38;5;87m")
 
-        print(f"  {model_icon} {info_dim}Model{C.RESET}  {model_color}{C.BOLD}{config.model}{C.RESET}")
+        _tier, _ = Config.get_model_tier(config.model)
+        _tier_colors = {"S": "196", "A": "208", "B": "226", "C": "46", "D": "51", "E": "250"}
+        _tier_str = ""
+        if _tier:
+            _tc = _tier_colors.get(_tier, "250")
+            _tier_str = " %s[Tier %s]%s" % (_ansi(chr(27) + "[38;5;%sm" % _tc), _tier, C.RESET)
+        print(f"  {model_icon} {info_dim}Model{C.RESET}  {model_color}{C.BOLD}{config.model}{C.RESET}{_tier_str}")
         print(f"  🔒 {info_dim}Mode{C.RESET}   {mode_str}")
         print(f"  🦙 {info_dim}Engine{C.RESET} {info_bright}Ollama{C.RESET} {C.DIM}({config.ollama_host}){C.RESET}")
         print(f"  💾 {info_dim}RAM{C.RESET}    {info_bright}{ram}GB{C.RESET} {C.DIM}(ctx: {config.context_window} tokens){C.RESET}")
@@ -4315,6 +4529,7 @@ class TUI:
   {_c198}/exit{C.RESET}, {_c198}/quit{C.RESET}, {_c198}/q{C.RESET}  Exit vibe-local
   {_c198}/clear{C.RESET}             Clear conversation
   {_c198}/model{C.RESET} <name>      Switch model
+  {_c198}/models{C.RESET}            List installed models with tier info
   {_c198}/status{C.RESET}            Session info
   {_c198}/save{C.RESET}              Save session
   {_c198}/compact{C.RESET}           Compress context to save memory
@@ -4561,7 +4776,7 @@ class Agent:
                                 fixed = re.sub(r',\s*}', '}', raw_args)
                                 fixed = re.sub(r',\s*]', ']', fixed)
                                 tool_params = json.loads(fixed)
-                            except (json.JSONDecodeError, Exception):
+                            except (json.JSONDecodeError, ValueError, TypeError, KeyError):
                                 # Unsalvageable — report error to LLM instead of passing bad params
                                 results.append(ToolResult(tc_id, f"Error: tool arguments are not valid JSON: {raw_args[:200]}", True))
                                 continue
@@ -4700,6 +4915,11 @@ class Agent:
                     body = e.read().decode("utf-8", errors="replace")[:200]
                 except Exception:
                     pass
+                finally:
+                    try:
+                        e.close()
+                    except Exception:
+                        pass
                 print(f"\n{C.RED}HTTP {e.code} {e.reason}: {body}{C.RESET}")
                 if e.code == 404:
                     print(f"{C.DIM}The model '{self.config.model}' may not be downloaded yet.{C.RESET}")
@@ -4742,6 +4962,20 @@ class Agent:
 # ════════════════════════════════════════════════════════════════════════════════
 # Main
 # ════════════════════════════════════════════════════════════════════════════════
+
+def _show_model_list(models):
+    """Display installed models with tier labels and colors."""
+    _tier_colors = {"S": "196", "A": "208", "B": "226", "C": "46", "D": "51", "E": "250"}
+    for m in sorted(models):
+        tier, min_ram = Config.get_model_tier(m)
+        if tier:
+            tc = _tier_colors.get(tier, "250")
+            _c = _ansi(chr(27) + "[38;5;%sm" % tc)
+            ctx = Config.MODEL_CONTEXT_SIZES.get(m, "?")
+            print(f"    {_c}[{tier}]{C.RESET} {m}  {C.DIM}(ctx: {ctx}, ~{min_ram}GB+ RAM){C.RESET}")
+        else:
+            print(f"    {C.DIM}[?]{C.RESET} {m}")
+
 
 def main():
     # Parse config
@@ -4990,9 +5224,9 @@ def main():
                     else:
                         print(f"{C.DIM}Already compact ({after} tokens, {len(session.messages)} messages){C.RESET}")
                     continue
-                elif cmd == "/model":
+                elif cmd == "/model" or cmd == "/models":
                     parts = user_input.split(maxsplit=1)
-                    if len(parts) > 1:
+                    if len(parts) > 1 and cmd == "/model":
                         new_model = parts[1].strip()
                         # M5: Validate model name against safe regex
                         _SAFE_MODEL_RE = re.compile(r'^[a-zA-Z0-9_.:\-/]+$')
@@ -5003,22 +5237,38 @@ def main():
                         _ok, fresh_models = client.check_connection()
                         if client.check_model(new_model, available_models=fresh_models if _ok else None):
                             config.model = new_model
-                            # M9: Update context window for known models
-                            for name, ctx in config.MODEL_CONTEXT_SIZES.items():
-                                if name in new_model:
-                                    config.context_window = ctx
-                                    break
-                            print(f"{C.GREEN}Switched to model: {new_model}{C.RESET}")
+                            config._apply_context_window(new_model)
+                            _tier, _ = Config.get_model_tier(new_model)
+                            _tier_str = f" (Tier {_tier})" if _tier else ""
+                            print(f"{C.GREEN}Switched to model: {new_model}{_tier_str}{C.RESET}")
+                            print(f"{C.DIM}Context window: {config.context_window} tokens{C.RESET}")
                         else:
                             avail = fresh_models if _ok else []
                             print(f"{C.YELLOW}Model '{new_model}' is not downloaded yet.{C.RESET}")
-                            print(f"{C.DIM}Available: {', '.join(avail)}{C.RESET}")
-                            print(f"{C.DIM}Download it first:  ollama pull {new_model}{C.RESET}")
+                            if avail:
+                                _show_model_list(avail)
+                            print(f"{C.DIM}Download it:  ollama pull {new_model}{C.RESET}")
                     else:
                         _ok, fresh_models = client.check_connection()
                         avail = fresh_models if _ok else []
-                        print(f"Current model: {config.model}")
-                        print(f"Available: {', '.join(avail)}")
+                        _tier, _ = Config.get_model_tier(config.model)
+                        _tier_str = f" (Tier {_tier})" if _tier else ""
+                        print(f"\n  {C.BOLD}Current model:{C.RESET} {_ansi(chr(27)+'[38;5;51m')}{config.model}{_tier_str}{C.RESET}")
+                        print(f"  {C.DIM}Context window: {config.context_window} tokens{C.RESET}")
+                        if config.sidecar_model:
+                            print(f"  {C.DIM}Sidecar (compaction): {config.sidecar_model}{C.RESET}")
+                        if avail:
+                            print(f"\n  {C.BOLD}Installed models:{C.RESET}")
+                            _show_model_list(avail)
+                        print(f"\n  {C.DIM}Switch: /model <name>  |  Download: ollama pull <name>{C.RESET}")
+                        _tier_legend = (f"  {C.DIM}Tiers: "
+                                        f"{_ansi(chr(27)+'[38;5;196m')}S{C.RESET}{C.DIM}=Frontier "
+                                        f"{_ansi(chr(27)+'[38;5;208m')}A{C.RESET}{C.DIM}=Expert "
+                                        f"{_ansi(chr(27)+'[38;5;226m')}B{C.RESET}{C.DIM}=Advanced "
+                                        f"{_ansi(chr(27)+'[38;5;46m')}C{C.RESET}{C.DIM}=Solid "
+                                        f"{_ansi(chr(27)+'[38;5;51m')}D{C.RESET}{C.DIM}=Light "
+                                        f"{C.WHITE}E{C.RESET}{C.DIM}=Minimal{C.RESET}")
+                        print(_tier_legend)
                     continue
                 elif cmd == "/yes":
                     config.yes_mode = True
@@ -5351,7 +5601,7 @@ def main():
 
                 else:
                     # "Did you mean?" for typo'd slash commands
-                    _all_cmds = ["/help", "/exit", "/quit", "/clear", "/model",
+                    _all_cmds = ["/help", "/exit", "/quit", "/clear", "/model", "/models",
                                  "/status", "/save", "/compact", "/yes", "/no",
                                  "/tokens", "/commit", "/diff", "/git", "/plan",
                                  "/undo", "/init", "/config", "/debug"]
