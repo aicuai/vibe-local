@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>タイマー</title>
+    <style>
+        body { font-family: "Meiryo", sans-serif; text-align: center; padding: 40px; background: #f0f8ff; }
+        #display { font-size: 120px; margin: 30px 0; }
+        input, button { font-family: "Meiryo", sans-serif; padding: 10px; font-size: 16px; }
+        button { margin: 5px; }
+    </style>
+</head>
+<body>
+    <h1>タイマー</h1>
+    <input type="number" id="minutes" placeholder="分" min="0">
+    <input type="number" id="seconds" placeholder="秒" min="0">
+    <br>
+    <button onclick="startTimer()">スタート</button>
+    <button onclick="pauseTimer()">一時停止</button>
+    <button onclick="resetTimer()">リセット</button>
+    <div id="display">00:00</div>
+
+    <script>
+        let timeLeft = 0;
+        let interval = null;
+        let isRunning = false;
+        const display = document.getElementById('display');
+        const minInput = document.getElementById('minutes');
+        const secInput = document.getElementById('seconds');
+
+        function updateDisplay() {
+            const minutes = Math.floor(timeLeft / 60);
+            const seconds = timeLeft % 60;
+            display.textContent = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+        }
+
+        function startTimer() {
+            const minutes = parseInt(minInput.value) || 0;
+            const seconds = parseInt(secInput.value) || 0;
+            timeLeft = minutes * 60 + seconds;
+            isRunning = true;
+            updateDisplay();
+            interval = setInterval(() => {
+                if (isRunning && timeLeft > 0) {
+                    timeLeft--;
+                    updateDisplay();
+                } else if (timeLeft === 0) {
+                    playAlert();
+                    clearInterval(interval);
+                }
+            }, 1000);
+        }
+
+        function pauseTimer() {
+            isRunning = false;
+        }
+
+        function resetTimer() {
+            clearInterval(interval);
+            isRunning = false;
+            timeLeft = 0;
+            updateDisplay();
+        }
+
+        function playAlert() {
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const oscillator = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            oscillator.type = 'sine';
+            oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // A note
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            oscillator.start();
+            oscillator.stop(audioCtx.currentTime + 1);
+        }
+    </script>
+</body>
+</html>
