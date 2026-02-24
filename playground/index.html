@@ -3,93 +3,362 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>vibe-local playground</title>
+    <title>vibe-local playground — ローカル LLM が生成したアプリたち</title>
     <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
             font-family: 'Meiryo', 'Segoe UI', sans-serif;
-            max-width: 700px;
-            margin: 40px auto;
-            padding: 0 20px;
-            background: #1a1a2e;
+            background: #0f0f1a;
             color: #e0e0e0;
+            line-height: 1.7;
         }
-        h1 {
+
+        /* Header */
+        header {
             text-align: center;
-            font-size: 28px;
+            padding: 40px 20px 20px;
+            background: linear-gradient(180deg, #1a1a3e 0%, #0f0f1a 100%);
+        }
+        header h1 {
+            font-size: 32px;
             background: linear-gradient(90deg, #ff6fd8, #3813c2);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
         }
-        .subtitle {
-            text-align: center;
+        header p {
             color: #888;
-            margin-bottom: 30px;
+            margin-top: 8px;
+            font-size: 15px;
         }
-        .card {
-            background: #16213e;
-            border-radius: 12px;
-            padding: 24px;
-            margin: 16px 0;
-            border: 1px solid #2a2a4a;
-            transition: transform 0.2s;
-        }
-        .card:hover {
-            transform: translateY(-2px);
-            border-color: #ff6fd8;
-        }
-        .card h2 { margin: 0 0 8px 0; font-size: 22px; }
-        .card h2 a {
-            color: #ff6fd8;
-            text-decoration: none;
-        }
-        .card h2 a:hover { text-decoration: underline; }
-        .card p { margin: 4px 0; color: #aaa; }
-        .tag {
+        .badge {
             display: inline-block;
             background: #2a2a4a;
             color: #ccc;
+            padding: 3px 12px;
+            border-radius: 12px;
+            font-size: 13px;
+            margin: 4px 3px;
+        }
+        .badge.model { background: #1a3a1a; color: #8fc98f; }
+        .badge.engine { background: #3a2a1a; color: #c9a86c; }
+
+        /* App sections */
+        .app-section {
+            max-width: 960px;
+            margin: 30px auto;
+            padding: 0 20px;
+        }
+        .app-card {
+            background: #16213e;
+            border-radius: 16px;
+            border: 1px solid #2a2a4a;
+            overflow: hidden;
+            margin-bottom: 40px;
+        }
+        .app-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 20px 24px;
+            border-bottom: 1px solid #2a2a4a;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .app-header h2 {
+            font-size: 22px;
+            color: #ff6fd8;
+        }
+        .app-header .meta { display: flex; gap: 8px; flex-wrap: wrap; }
+        .tag {
+            display: inline-block;
             padding: 2px 10px;
             border-radius: 12px;
             font-size: 13px;
-            margin-right: 6px;
         }
         .tag.ok { background: #1b4332; color: #95d5b2; }
         .tag.ng { background: #4a1520; color: #f4a0a0; }
         .tag.fixed { background: #1a3a5c; color: #90caf9; }
+        .tag.lines { background: #2a2a4a; color: #ccc; }
+
+        /* iframe preview */
+        .preview {
+            background: #fff;
+            width: 100%;
+            height: 480px;
+            border: none;
+        }
+        .preview-controls {
+            padding: 8px 24px;
+            background: #111b30;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 13px;
+            color: #888;
+        }
+        .preview-controls a {
+            color: #90caf9;
+            text-decoration: none;
+            font-size: 13px;
+        }
+        .preview-controls a:hover { text-decoration: underline; }
+
+        /* Code analysis */
+        .analysis {
+            padding: 20px 24px;
+            border-top: 1px solid #2a2a4a;
+        }
+        .analysis h3 {
+            font-size: 16px;
+            color: #aaa;
+            margin-bottom: 12px;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+        .stat {
+            background: #111b30;
+            border-radius: 8px;
+            padding: 12px 16px;
+        }
+        .stat .label { font-size: 12px; color: #888; }
+        .stat .value { font-size: 20px; font-weight: bold; color: #e0e0e0; margin-top: 2px; }
+        .stat .value.good { color: #95d5b2; }
+        .stat .value.warn { color: #ffd166; }
+        .stat .value.bad { color: #f4a0a0; }
+
+        .notes {
+            background: #111b30;
+            border-radius: 8px;
+            padding: 16px;
+            font-size: 14px;
+            color: #bbb;
+        }
+        .notes ul { padding-left: 20px; }
+        .notes li { margin: 4px 0; }
+        .notes code {
+            background: #1a2a44;
+            padding: 1px 6px;
+            border-radius: 4px;
+            font-size: 13px;
+            color: #90caf9;
+        }
+        .notes .highlight { color: #ff6fd8; font-weight: bold; }
+
+        /* Footer */
         footer {
             text-align: center;
-            margin-top: 40px;
+            padding: 30px 20px;
             color: #555;
             font-size: 13px;
+            border-top: 1px solid #1a1a3e;
+            margin-top: 20px;
         }
         footer a { color: #888; }
     </style>
 </head>
 <body>
+
+<header>
     <h1>vibe-local playground</h1>
-    <p class="subtitle">ローカル LLM (qwen3:8b) が生成したアプリたち</p>
+    <p>ローカル LLM がワンショットで生成したアプリをそのまま公開</p>
+    <div style="margin-top: 12px;">
+        <span class="badge model">qwen3:8b (5.2GB)</span>
+        <span class="badge engine">vibe-coder.py v0.9.4</span>
+        <span class="badge">完全オフライン</span>
+        <span class="badge">RTX 4050 Laptop</span>
+    </div>
+</header>
 
-    <div class="card">
-        <h2><a href="janken.html">じゃんけんゲーム</a></h2>
-        <p>グー・チョキ・パーを選んでコンピュータと対戦</p>
-        <p><span class="tag ok">動作 OK</span> <span class="tag">42行</span> <span class="tag">生成そのまま</span></p>
+<div class="app-section">
+
+    <!-- ===== じゃんけん ===== -->
+    <div class="app-card">
+        <div class="app-header">
+            <h2>1. じゃんけんゲーム</h2>
+            <div class="meta">
+                <span class="tag ok">動作 OK</span>
+                <span class="tag lines">42 行</span>
+                <span class="tag ok">生成そのまま</span>
+            </div>
+        </div>
+        <div class="preview-controls">
+            <span>▶ ライブプレビュー</span>
+            <a href="janken.html" target="_blank">別タブで開く ↗</a>
+        </div>
+        <iframe class="preview" src="janken.html" style="height: 350px;"></iframe>
+        <div class="analysis">
+            <h3>コード解説</h3>
+            <div class="stats-grid">
+                <div class="stat">
+                    <div class="label">行数</div>
+                    <div class="value good">42 行</div>
+                </div>
+                <div class="stat">
+                    <div class="label">生成モデル</div>
+                    <div class="value">qwen3:8b</div>
+                </div>
+                <div class="stat">
+                    <div class="label">入力トークン</div>
+                    <div class="value">~2,980</div>
+                </div>
+                <div class="stat">
+                    <div class="label">出力トークン</div>
+                    <div class="value">~1,642</div>
+                </div>
+                <div class="stat">
+                    <div class="label">ツール使用</div>
+                    <div class="value warn">Write × 2</div>
+                </div>
+                <div class="stat">
+                    <div class="label">試行回数</div>
+                    <div class="value good">1 回（リトライ 1）</div>
+                </div>
+            </div>
+            <div class="notes">
+                <ul>
+                    <li><code>Math.random()</code> でコンピュータの手をランダム選択</li>
+                    <li>勝敗判定は <code>if-else</code> チェーンで 3 パターンをチェック</li>
+                    <li>テンプレートリテラルで結果を動的に表示</li>
+                    <li><span class="highlight">難しかったところ:</span> 特になし。8b モデルでも一発で正確なロジックを生成</li>
+                    <li>1 回目の Write で <code>file_path</code> パラメータを忘れてエラー → 2 回目で成功</li>
+                </ul>
+            </div>
+        </div>
     </div>
 
-    <div class="card">
-        <h2><a href="timer.html">カウントダウンタイマー</a></h2>
-        <p>分・秒を入力してカウントダウン。Web Audio API でアラート音</p>
-        <p><span class="tag ok">動作 OK</span> <span class="tag">78行</span> <span class="tag">生成そのまま</span></p>
+    <!-- ===== タイマー ===== -->
+    <div class="app-card">
+        <div class="app-header">
+            <h2>2. カウントダウンタイマー</h2>
+            <div class="meta">
+                <span class="tag ok">動作 OK</span>
+                <span class="tag lines">78 行</span>
+                <span class="tag ok">生成そのまま</span>
+            </div>
+        </div>
+        <div class="preview-controls">
+            <span>▶ ライブプレビュー</span>
+            <a href="timer.html" target="_blank">別タブで開く ↗</a>
+        </div>
+        <iframe class="preview" src="timer.html" style="height: 380px;"></iframe>
+        <div class="analysis">
+            <h3>コード解説</h3>
+            <div class="stats-grid">
+                <div class="stat">
+                    <div class="label">行数</div>
+                    <div class="value good">78 行</div>
+                </div>
+                <div class="stat">
+                    <div class="label">生成モデル</div>
+                    <div class="value">qwen3:8b</div>
+                </div>
+                <div class="stat">
+                    <div class="label">入力トークン</div>
+                    <div class="value">~2,980</div>
+                </div>
+                <div class="stat">
+                    <div class="label">出力トークン</div>
+                    <div class="value">~1,642</div>
+                </div>
+                <div class="stat">
+                    <div class="label">ツール使用</div>
+                    <div class="value warn">Write × 3</div>
+                </div>
+                <div class="stat">
+                    <div class="label">試行回数</div>
+                    <div class="value good">1 回（リトライ 1）</div>
+                </div>
+            </div>
+            <div class="notes">
+                <ul>
+                    <li><code>setInterval</code> / <code>clearInterval</code> でカウントダウン制御</li>
+                    <li><code>Web Audio API</code>（<code>OscillatorNode</code>）で 880Hz のビープ音 — 外部ファイル不要</li>
+                    <li><code>padStart(2, '0')</code> で <code>00:00</code> 形式のデジタル表示</li>
+                    <li>フォントサイズ 120px の大きなディスプレイで見やすい</li>
+                    <li><span class="highlight">難しかったところ:</span> Web Audio API を正しく使えている点は 8b にしては優秀</li>
+                    <li><span class="highlight">既知のバグ:</span> 一時停止後の「スタート」が残り時間からではなく入力値で再スタートする</li>
+                    <li>3 回目の Write で <code>C:\Users\Public\Documents\</code> にも書き込み（意図しない副作用）</li>
+                </ul>
+            </div>
+        </div>
     </div>
 
-    <div class="card">
-        <h2><a href="minesweeper.html">マインスイーパー</a></h2>
-        <p>9x9 グリッド、10 個の地雷。左クリックで開く、右クリックで旗</p>
-        <p><span class="tag fixed">手動修正済</span> <span class="tag">元は1行+構文エラー</span></p>
+    <!-- ===== マインスイーパー ===== -->
+    <div class="app-card">
+        <div class="app-header">
+            <h2>3. マインスイーパー</h2>
+            <div class="meta">
+                <span class="tag fixed">手動修正済</span>
+                <span class="tag lines">251 行（修正後）</span>
+                <span class="tag ng">元は 1 行 + 構文エラー</span>
+            </div>
+        </div>
+        <div class="preview-controls">
+            <span>▶ ライブプレビュー（修正版）</span>
+            <a href="minesweeper.html" target="_blank">別タブで開く ↗</a>
+        </div>
+        <iframe class="preview" src="minesweeper.html"></iframe>
+        <div class="analysis">
+            <h3>コード解説</h3>
+            <div class="stats-grid">
+                <div class="stat">
+                    <div class="label">行数（元 / 修正後）</div>
+                    <div class="value bad">1 行 → 251 行</div>
+                </div>
+                <div class="stat">
+                    <div class="label">生成モデル</div>
+                    <div class="value">qwen3:8b</div>
+                </div>
+                <div class="stat">
+                    <div class="label">入力トークン</div>
+                    <div class="value">~3,006</div>
+                </div>
+                <div class="stat">
+                    <div class="label">出力トークン</div>
+                    <div class="value">~2,704</div>
+                </div>
+                <div class="stat">
+                    <div class="label">ツール使用</div>
+                    <div class="value bad">Write 失敗 × 3</div>
+                </div>
+                <div class="stat">
+                    <div class="label">試行回数</div>
+                    <div class="value bad">3 回（2 回完全失敗）</div>
+                </div>
+            </div>
+            <div class="notes">
+                <ul>
+                    <li><span class="highlight">qwen3:8b の元コード問題点（6 個）:</span></li>
+                    <li>全コードが <code>echo</code> 経由で <strong>1 行に圧縮</strong>（改行なし、可読性ゼロ）</li>
+                    <li>構文エラー: <code>()=&gt;$revealCell(cell)</code> — <code>$</code> が余分</li>
+                    <li>CSS セレクタ: <code>cell</code> → <code>.cell</code> であるべき（スタイル適用されない）</li>
+                    <li>データ構造: <code>board.find()</code> で O(n) 検索（非効率）</li>
+                    <li><code>mines</code> 変数が地雷配置で 0 になり勝利判定が壊れる</li>
+                    <li>空セル展開（flood fill）が未実装</li>
+                </ul>
+                <ul style="margin-top: 12px;">
+                    <li><span class="highlight">修正版で追加した機能:</span></li>
+                    <li>2D 配列 <code>grid[r][c]</code> による O(1) セルアクセス</li>
+                    <li><strong>Flood fill</strong>（スタックベース）で空セル自動展開</li>
+                    <li>クラシックな 3D <code>border-color</code> による凹凸表現</li>
+                    <li>数字ごとの色分け（1=青, 2=緑, 3=赤, ...）</li>
+                    <li>地雷全表示、勝利/敗北メッセージ</li>
+                </ul>
+            </div>
+        </div>
     </div>
 
-    <footer>
-        Generated by <a href="https://github.com/ochyai/vibe-local">vibe-local</a> (qwen3:8b via vibe-coder.py)<br>
-        Documented at <a href="https://github.com/aicuai/vibe-local">aicuai/vibe-local</a>
-    </footer>
+</div>
+
+<footer>
+    Generated by <a href="https://github.com/ochyai/vibe-local">vibe-local</a> (qwen3:8b via vibe-coder.py) |
+    Blog: <a href="https://github.com/aicuai/vibe-local">aicuai/vibe-local</a><br>
+    Minesweeper manually fixed by Claude Opus 4.6 — others are raw LLM output
+</footer>
+
 </body>
 </html>
