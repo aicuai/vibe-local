@@ -1,1 +1,250 @@
-<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><title> Minesweeper </title><style>body{font-family:'Meiryo',sans-serif;text-align:center;margin:20px;}#game{display:grid;grid-template-columns:repeat(9,40px);grid-gap:5px;margin:0 auto;}cell{width:40px;height:40px;font-size:20px;line-height:40px;border:2px solid #333;box-shadow:2px 2px 5px #888;position:relative;cursor:pointer;}cell.revealed{background:#f0f0f0;box-shadow:0 0 5px #aaa;}cell.flagged{background:#ffd700;box-shadow:0 0 5px #ffcc00;cursor:default;}#status{margin:10px 0;}</style></head><body><div id="status"><div>地雷数: <span id="mineCount">10</span></div><div>所要時間: <span id="timer">0</span>s</div></div><div id="game"></div><script>let mines=10,board=[],revealed=0,gameOver=false;function createBoard(){let game=document.getElementById('game');game.innerHTML='';let cells=[];for(let y=0;y<9;y++){for(let x=0;x<9;x++){let cell=document.createElement('div');cell.className='cell';cell.dataset.x=x;cell.dataset.y=y;cell.addEventListener('contextmenu',e=>{e.preventDefault();toggleFlag(cell);});cell.addEventListener('click',()=>$revealCell(cell);});cells.push(cell);}}game.append(...cells);placeMines();}function placeMines(){let minePositions=new Set();while(mines>0){let x=Math.floor(Math.random()*9),y=Math.floor(Math.random()*9);if(!minePositions.has(`${x},${y}`)){minePositions.add(`${x},${y}`);board.push({x,y,mine:true});mines--;}}board=board.concat(Array(81-mines).fill({mine:false}));}function toggleFlag(cell){if(gameOver)return;if(cell.classList.contains('flagged')){cell.classList.remove('flagged');document.getElementById('mineCount').textContent=parseInt(document.getElementById('mineCount').textContent)+1;}else{cell.classList.add('flagged');document.getElementById('mineCount').textContent=parseInt(document.getElementById('mineCount').textContent)-1;}}function revealCell(cell){if(gameOver)return;if(cell.classList.contains('flagged'))return;if(board.find(b=>b.x==cell.dataset.x && b.y==cell.dataset.y).mine){gameOver=true;cell.style.backgroundColor='red';document.getElementById('status').innerHTML+='<div>ゲームオーバー</div>';return;}revealed++;cell.classList.add('revealed');let count=0;for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++)if(board.find(b=>b.x==cell.dataset.x+dx && b.y==cell.dataset.y+dy).mine)count++;if(count>0){cell.textContent=count;}if(revealed==81-mines){document.getElementById('status').innerHTML+='<div>クリア！</div>';}}setInterval(()=>{if(!gameOver)document.getElementById('timer').textContent=parseInt(document.getElementById('timer').textContent)+1;},1000);createBoard();</script></body></html>
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>マインスイーパー</title>
+    <style>
+        body {
+            font-family: 'Meiryo', sans-serif;
+            text-align: center;
+            margin: 20px;
+            background: #c0c0c0;
+        }
+        h1 { margin: 10px 0; }
+        #info {
+            display: flex;
+            justify-content: center;
+            gap: 40px;
+            margin: 10px 0;
+            font-size: 20px;
+            font-weight: bold;
+        }
+        #info span { color: #d00; }
+        #board {
+            display: inline-grid;
+            grid-template-columns: repeat(9, 32px);
+            gap: 1px;
+            background: #808080;
+            border: 3px solid;
+            border-color: #fff #808080 #808080 #fff;
+            padding: 3px;
+        }
+        .cell {
+            width: 32px;
+            height: 32px;
+            font-size: 16px;
+            font-weight: bold;
+            line-height: 32px;
+            text-align: center;
+            cursor: pointer;
+            background: #c0c0c0;
+            border: 2px solid;
+            border-color: #fff #808080 #808080 #fff;
+            user-select: none;
+        }
+        .cell.revealed {
+            border: 1px solid #808080;
+            background: #d0d0d0;
+            cursor: default;
+        }
+        .cell.mine { background: #f00; }
+        .cell.flagged::after { content: "🚩"; }
+        .c1 { color: #0000ff; }
+        .c2 { color: #008000; }
+        .c3 { color: #ff0000; }
+        .c4 { color: #000080; }
+        .c5 { color: #800000; }
+        .c6 { color: #008080; }
+        .c7 { color: #000000; }
+        .c8 { color: #808080; }
+        #message {
+            margin: 15px 0;
+            font-size: 24px;
+            font-weight: bold;
+            min-height: 32px;
+        }
+        button {
+            padding: 10px 30px;
+            font-size: 18px;
+            font-family: 'Meiryo', sans-serif;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <h1>マインスイーパー</h1>
+    <div id="info">
+        <div>💣 <span id="mineCount">10</span></div>
+        <div>⏱ <span id="timer">0</span>秒</div>
+    </div>
+    <div id="board"></div>
+    <div id="message"></div>
+    <button onclick="initGame()">リセット</button>
+
+    <script>
+        const ROWS = 9, COLS = 9, MINES = 10;
+        let grid, revealed, flagged, gameOver, timerInterval, seconds;
+
+        function initGame() {
+            clearInterval(timerInterval);
+            seconds = 0;
+            revealed = 0;
+            flagged = 0;
+            gameOver = false;
+            document.getElementById('timer').textContent = '0';
+            document.getElementById('mineCount').textContent = MINES;
+            document.getElementById('message').textContent = '';
+            timerInterval = null;
+
+            // Initialize grid
+            grid = [];
+            for (let r = 0; r < ROWS; r++) {
+                grid[r] = [];
+                for (let c = 0; c < COLS; c++) {
+                    grid[r][c] = { mine: false, revealed: false, flagged: false, count: 0 };
+                }
+            }
+
+            // Place mines
+            let placed = 0;
+            while (placed < MINES) {
+                const r = Math.floor(Math.random() * ROWS);
+                const c = Math.floor(Math.random() * COLS);
+                if (!grid[r][c].mine) {
+                    grid[r][c].mine = true;
+                    placed++;
+                }
+            }
+
+            // Calculate neighbor counts
+            for (let r = 0; r < ROWS; r++) {
+                for (let c = 0; c < COLS; c++) {
+                    if (grid[r][c].mine) continue;
+                    let count = 0;
+                    for (let dr = -1; dr <= 1; dr++) {
+                        for (let dc = -1; dc <= 1; dc++) {
+                            const nr = r + dr, nc = c + dc;
+                            if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && grid[nr][nc].mine) {
+                                count++;
+                            }
+                        }
+                    }
+                    grid[r][c].count = count;
+                }
+            }
+
+            renderBoard();
+        }
+
+        function renderBoard() {
+            const board = document.getElementById('board');
+            board.innerHTML = '';
+            for (let r = 0; r < ROWS; r++) {
+                for (let c = 0; c < COLS; c++) {
+                    const cell = document.createElement('div');
+                    cell.className = 'cell';
+                    cell.addEventListener('click', () => reveal(r, c));
+                    cell.addEventListener('contextmenu', e => {
+                        e.preventDefault();
+                        toggleFlag(r, c);
+                    });
+                    cell.id = `cell-${r}-${c}`;
+                    board.appendChild(cell);
+                }
+            }
+        }
+
+        function startTimer() {
+            if (timerInterval) return;
+            timerInterval = setInterval(() => {
+                seconds++;
+                document.getElementById('timer').textContent = seconds;
+            }, 1000);
+        }
+
+        function reveal(r, c) {
+            if (gameOver) return;
+            const cell = grid[r][c];
+            if (cell.revealed || cell.flagged) return;
+
+            startTimer();
+
+            if (cell.mine) {
+                // Game over
+                gameOver = true;
+                clearInterval(timerInterval);
+                cell.revealed = true;
+                revealAllMines();
+                document.getElementById('message').textContent = '💥 ゲームオーバー！';
+                return;
+            }
+
+            // Flood fill for empty cells
+            const stack = [[r, c]];
+            while (stack.length > 0) {
+                const [cr, cc] = stack.pop();
+                if (cr < 0 || cr >= ROWS || cc < 0 || cc >= COLS) continue;
+                const current = grid[cr][cc];
+                if (current.revealed || current.mine || current.flagged) continue;
+
+                current.revealed = true;
+                revealed++;
+                const el = document.getElementById(`cell-${cr}-${cc}`);
+                el.classList.add('revealed');
+                if (current.count > 0) {
+                    el.textContent = current.count;
+                    el.classList.add(`c${current.count}`);
+                } else {
+                    // Empty cell: expand neighbors
+                    for (let dr = -1; dr <= 1; dr++) {
+                        for (let dc = -1; dc <= 1; dc++) {
+                            stack.push([cr + dr, cc + dc]);
+                        }
+                    }
+                }
+            }
+
+            // Win check
+            if (revealed === ROWS * COLS - MINES) {
+                gameOver = true;
+                clearInterval(timerInterval);
+                document.getElementById('message').textContent = '🎉 クリア！';
+            }
+        }
+
+        function toggleFlag(r, c) {
+            if (gameOver) return;
+            const cell = grid[r][c];
+            if (cell.revealed) return;
+
+            startTimer();
+            const el = document.getElementById(`cell-${r}-${c}`);
+
+            if (cell.flagged) {
+                cell.flagged = false;
+                flagged--;
+                el.classList.remove('flagged');
+            } else {
+                cell.flagged = true;
+                flagged++;
+                el.classList.add('flagged');
+            }
+            document.getElementById('mineCount').textContent = MINES - flagged;
+        }
+
+        function revealAllMines() {
+            for (let r = 0; r < ROWS; r++) {
+                for (let c = 0; c < COLS; c++) {
+                    if (grid[r][c].mine) {
+                        const el = document.getElementById(`cell-${r}-${c}`);
+                        el.classList.add('revealed', 'mine');
+                        el.textContent = '💣';
+                    }
+                }
+            }
+        }
+
+        initGame();
+    </script>
+</body>
+</html>
