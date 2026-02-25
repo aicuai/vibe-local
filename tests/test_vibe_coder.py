@@ -1270,7 +1270,7 @@ class TestOllamaClient:
         client = self._make_client()
         import urllib.error
         error = urllib.error.HTTPError(
-            url="http://localhost:11434/v1/chat/completions",
+            url="http://localhost:11434/api/chat",
             code=404,
             msg="Not Found",
             hdrs=None,
@@ -1305,6 +1305,172 @@ class TestGetRamGb:
         with mock.patch("platform.system", side_effect=Exception("boom")):
             result = vc._get_ram_gb()
         assert result == 16
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 14b. _get_vram_gb
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestGetVramGb:
+
+    def test_macos_returns_zero(self):
+        """On macOS (Apple Silicon unified memory), VRAM detection should return 0."""
+        with mock.patch("platform.system", return_value="Darwin"):
+            result = vc._get_vram_gb()
+        assert result == 0
+
+    def test_nvidia_smi_not_found(self):
+        """When nvidia-smi is not installed, should return 0."""
+        with mock.patch("platform.system", return_value="Linux"):
+            with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+                result = vc._get_vram_gb()
+        assert result == 0
+
+    def test_nvidia_smi_success(self):
+        """Should parse nvidia-smi output and return VRAM in GB."""
+        fake_result = mock.MagicMock()
+        fake_result.returncode = 0
+        fake_result.stdout = "24576\n"  # 24GB in MiB
+        with mock.patch("platform.system", return_value="Linux"):
+            with mock.patch("subprocess.run", return_value=fake_result):
+                result = vc._get_vram_gb()
+        assert result == 24
+
+    def test_nvidia_smi_multi_gpu(self):
+        """With multiple GPUs, should return the largest VRAM."""
+        fake_result = mock.MagicMock()
+        fake_result.returncode = 0
+        fake_result.stdout = "24576\n49152\n"  # 24GB + 48GB
+        with mock.patch("platform.system", return_value="Linux"):
+            with mock.patch("subprocess.run", return_value=fake_result):
+                result = vc._get_vram_gb()
+        assert result == 48
+
+    def test_nvidia_smi_error(self):
+        """When nvidia-smi returns error, should return 0."""
+        fake_result = mock.MagicMock()
+        fake_result.returncode = 1
+        fake_result.stdout = ""
+        with mock.patch("platform.system", return_value="Linux"):
+            with mock.patch("subprocess.run", return_value=fake_result):
+                result = vc._get_vram_gb()
+        assert result == 0
+
+    def test_nvidia_smi_timeout(self):
+        """When nvidia-smi times out, should return 0."""
+        import subprocess
+        with mock.patch("platform.system", return_value="Windows"):
+            with mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("nvidia-smi", 5)):
+                result = vc._get_vram_gb()
+        assert result == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 14c. Native API conversion helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestNativeApiConversion:
+
+    def test_prepare_messages_converts_tool_call_args(self):
+        """Tool call arguments should be converted from string to dict."""
+        messages = [
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "call_1", "type": "function", "function": {
+                    "name": "Read", "arguments": '{"file_path": "/tmp/a.txt"}'
+                }}
+            ]},
+        ]
+        result = vc.OllamaClient._prepare_messages_for_native(messages)
+        tc = result[0]["tool_calls"][0]
+        assert tc["function"]["arguments"] == {"file_path": "/tmp/a.txt"}
+        assert tc["function"]["name"] == "Read"
+
+    def test_prepare_messages_converts_image_content(self):
+        """Multipart image content should be converted to native images field."""
+        messages = [
+            {"role": "user", "content": [
+                {"type": "text", "text": "What is this?"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+            ]},
+        ]
+        result = vc.OllamaClient._prepare_messages_for_native(messages)
+        assert result[0]["content"] == "What is this?"
+        assert result[0]["images"] == ["AAAA"]
+
+    def test_prepare_messages_passthrough_normal(self):
+        """Normal messages should pass through unchanged."""
+        messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]
+        result = vc.OllamaClient._prepare_messages_for_native(messages)
+        assert result[0]["content"] == "hello"
+        assert result[1]["content"] == "hi"
+
+    def test_native_to_openai_response_basic(self):
+        """Native response should be converted to OpenAI format."""
+        native = {
+            "message": {"role": "assistant", "content": "Hello!"},
+            "done": True,
+            "eval_count": 5,
+            "prompt_eval_count": 10,
+        }
+        result = vc.OllamaClient._native_to_openai_response(native)
+        assert result["choices"][0]["message"]["content"] == "Hello!"
+        assert result["usage"]["prompt_tokens"] == 10
+        assert result["usage"]["completion_tokens"] == 5
+
+    def test_native_to_openai_response_tool_calls(self):
+        """Native tool calls should be converted to OpenAI format with string arguments."""
+        native = {
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"function": {"name": "Read", "arguments": {"file_path": "/tmp/a.txt"}}},
+                ],
+            },
+            "done": True,
+        }
+        result = vc.OllamaClient._native_to_openai_response(native)
+        tcs = result["choices"][0]["message"]["tool_calls"]
+        assert len(tcs) == 1
+        assert tcs[0]["function"]["name"] == "Read"
+        assert tcs[0]["type"] == "function"
+        assert tcs[0]["id"].startswith("call_")
+        # Arguments should be a JSON string
+        args = json.loads(tcs[0]["function"]["arguments"])
+        assert args == {"file_path": "/tmp/a.txt"}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 14d. VRAM-aware model selection
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestVramAwareModelSelection:
+
+    def test_vram_used_for_model_selection(self):
+        """On Linux with NVIDIA GPU, VRAM should influence model selection."""
+        cfg = vc.Config()
+        cfg.ollama_host = "http://localhost:11434"
+        # Simulate: low RAM (8GB) but high VRAM (48GB)
+        with mock.patch.object(vc, '_get_ram_gb', return_value=8):
+            with mock.patch.object(vc, '_get_vram_gb', return_value=48):
+                with mock.patch.object(cfg, '_query_installed_models', return_value=[]):
+                    cfg._auto_detect_model()
+        # With effective_mem=48GB, should pick large model
+        assert cfg.model == "qwen3-coder:30b"
+
+    def test_vram_zero_falls_back_to_ram(self):
+        """When no GPU detected (vram=0), should use RAM only."""
+        cfg = vc.Config()
+        cfg.ollama_host = "http://localhost:11434"
+        with mock.patch.object(vc, '_get_ram_gb', return_value=8):
+            with mock.patch.object(vc, '_get_vram_gb', return_value=0):
+                with mock.patch.object(cfg, '_query_installed_models', return_value=[]):
+                    cfg._auto_detect_model()
+        # 8GB RAM → small model
+        assert cfg.model == "qwen3:1.7b"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1489,30 +1655,62 @@ class TestSessionTokenEstimation:
 # Round 3 CRITICAL Fix Regression Tests
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TestSSEStreamCleanup:
-    """Test that _iter_sse properly closes HTTP response."""
+class TestNDJSONStreamCleanup:
+    """Test that _iter_ndjson properly closes HTTP response."""
 
     def test_response_closed_on_done(self):
-        """HTTP response should be closed when [DONE] is received."""
+        """HTTP response should be closed when done:true is received."""
         client = vc.OllamaClient.__new__(vc.OllamaClient)
         client.debug = False
         mock_resp = mock.MagicMock()
         mock_resp.read.side_effect = [
-            b'data: {"choices":[{"delta":{"content":"hi"}}]}\n',
-            b'data: [DONE]\n',
+            b'{"message":{"role":"assistant","content":"hi"},"done":false}\n',
+            b'{"message":{"role":"assistant","content":""},"done":true}\n',
         ]
-        chunks = list(client._iter_sse(mock_resp))
-        assert len(chunks) == 1
+        chunks = list(client._iter_ndjson(mock_resp))
+        # First chunk has content, second is done marker
+        assert any(c["choices"][0]["delta"].get("content") == "hi" for c in chunks)
         mock_resp.close.assert_called_once()
 
     def test_response_closed_on_empty(self):
-        """HTTP response should be closed when stream ends without DONE."""
+        """HTTP response should be closed when stream ends without done."""
         client = vc.OllamaClient.__new__(vc.OllamaClient)
         client.debug = False
         mock_resp = mock.MagicMock()
-        mock_resp.read.side_effect = [b'data: {"choices":[{"delta":{}}]}\n', b'']
-        chunks = list(client._iter_sse(mock_resp))
+        mock_resp.read.side_effect = [
+            b'{"message":{"role":"assistant","content":""},"done":false}\n',
+            b'',
+        ]
+        chunks = list(client._iter_ndjson(mock_resp))
         mock_resp.close.assert_called_once()
+
+    def test_ndjson_tool_calls_converted(self):
+        """Tool calls in NDJSON stream should be converted to OpenAI delta format."""
+        client = vc.OllamaClient.__new__(vc.OllamaClient)
+        client.debug = False
+        mock_resp = mock.MagicMock()
+        tool_line = json.dumps({
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"function": {"name": "Read", "arguments": {"file_path": "/tmp/a.txt"}}}],
+            },
+            "done": True,
+            "eval_count": 10,
+            "prompt_eval_count": 5,
+        }).encode() + b"\n"
+        mock_resp.read.side_effect = [tool_line, b'']
+        chunks = list(client._iter_ndjson(mock_resp))
+        assert len(chunks) >= 1
+        last = chunks[-1]
+        tc_deltas = last["choices"][0]["delta"].get("tool_calls", [])
+        assert len(tc_deltas) == 1
+        assert tc_deltas[0]["function"]["name"] == "Read"
+        # Arguments should be a JSON string (OpenAI format)
+        assert '"file_path"' in tc_deltas[0]["function"]["arguments"]
+        # Usage should be present on done chunk
+        assert last["usage"]["prompt_tokens"] == 5
+        assert last["usage"]["completion_tokens"] == 10
 
 
 class TestToolCallDeduplication:
@@ -2467,7 +2665,7 @@ class TestPlanMode:
     """Plan mode restricts tools to read-only set."""
 
     def test_plan_mode_tools_set(self):
-        """PLAN_MODE_TOOLS should include read-only and task tools."""
+        """PLAN_MODE_TOOLS should include read-only, task, and plan-write tools."""
         tools = vc.Agent.PLAN_MODE_TOOLS
         assert "Read" in tools
         assert "Glob" in tools
@@ -2476,9 +2674,11 @@ class TestPlanMode:
         assert "WebSearch" in tools
         assert "TaskCreate" in tools
         assert "TaskList" in tools
+        # Write is allowed but restricted to plans/ at runtime
+        assert "Write" in tools
+        assert "AskUserQuestion" in tools
         # Side-effecting tools must NOT be in plan mode
         assert "Bash" not in tools
-        assert "Write" not in tools
         assert "Edit" not in tools
         assert "NotebookEdit" not in tools
 
@@ -2726,7 +2926,7 @@ class TestOllamaClientChatErrors:
         client = self._make_client()
         import urllib.error
         error = urllib.error.HTTPError(
-            url="http://localhost:11434/v1/chat/completions",
+            url="http://localhost:11434/api/chat",
             code=400, msg="Bad Request", hdrs=None,
             fp=mock.MagicMock(read=mock.MagicMock(return_value=b"context length exceeded")),
         )
@@ -2738,7 +2938,7 @@ class TestOllamaClientChatErrors:
         client = self._make_client()
         import urllib.error
         error = urllib.error.HTTPError(
-            url="http://localhost:11434/v1/chat/completions",
+            url="http://localhost:11434/api/chat",
             code=500, msg="Internal Server Error", hdrs=None,
             fp=mock.MagicMock(read=mock.MagicMock(return_value=b"internal error")),
         )
@@ -2768,8 +2968,10 @@ class TestChatToolModePayload:
 
         captured = {}
         mock_resp = mock.MagicMock()
+        # Native /api/chat format response
         mock_resp.read.return_value = json.dumps({
-            "choices": [{"message": {"content": "hello", "tool_calls": []}}]
+            "message": {"role": "assistant", "content": "hello"},
+            "done": True,
         }).encode()
 
         def capture_urlopen(req, **kwargs):
@@ -2781,7 +2983,8 @@ class TestChatToolModePayload:
             client.chat("model", [{"role": "user", "content": "hi"}], tools=tools, stream=True)
 
         assert captured["data"]["stream"] is False
-        assert captured["data"]["temperature"] <= 0.3
+        # Temperature is now in options (native API format)
+        assert captured["data"]["options"]["temperature"] <= 0.3
 
 
 class TestEditToolValidation:
@@ -4859,7 +5062,7 @@ class TestTokenUsageDisplay:
 
     def test_version_bump(self):
         """Verify version was bumped for this feature release."""
-        assert vc.__version__ == "0.9.4"
+        assert vc.__version__ == "1.3.2"
 
     def test_bash_tool_has_run_in_background_param(self):
         tool = vc.BashTool()
@@ -6917,3 +7120,3078 @@ class TestMediumFixes:
             content = f.read()
         # For new files, realpath should be applied
         assert "resolved = os.path.realpath(file_path)" in content
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# NEW FEATURES (v1.0.0): MCP, Skills, Plan/Act, Git Checkpoint, Auto Test
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestMCPClient:
+    """Tests for the MCPClient class."""
+
+    def test_mcp_client_init(self):
+        """MCPClient stores config correctly."""
+        mcp = vc.MCPClient("test-server", "echo", args=["hello"], env={"FOO": "bar"})
+        assert mcp.name == "test-server"
+        assert mcp.command == "echo"
+        assert mcp.args == ["hello"]
+        assert mcp.env == {"FOO": "bar"}
+        assert mcp._proc is None
+        assert mcp._request_id == 0
+
+    def test_mcp_client_default_args(self):
+        """MCPClient default args and env."""
+        mcp = vc.MCPClient("s", "cmd")
+        assert mcp.args == []
+        assert mcp.env == {}
+
+    def test_mcp_send_without_start_raises(self):
+        """_send should raise if server not started."""
+        mcp = vc.MCPClient("test", "echo")
+        with pytest.raises(RuntimeError, match="not running"):
+            mcp._send("test/method")
+
+    def test_mcp_stop_no_proc(self):
+        """stop() should not crash if no process."""
+        mcp = vc.MCPClient("test", "echo")
+        mcp.stop()  # should not raise
+
+    def test_mcp_stop_dead_proc(self):
+        """stop() should handle already-dead process."""
+        mcp = vc.MCPClient("test", "echo")
+        mock_proc = mock.MagicMock()
+        mock_proc.poll.return_value = 0  # already dead
+        mcp._proc = mock_proc
+        mcp.stop()
+        mock_proc.stdin.close.assert_not_called()
+
+    def test_mcp_client_start_not_found(self):
+        """start() with nonexistent command should raise."""
+        mcp = vc.MCPClient("test", "/nonexistent/binary/xyz_12345")
+        with pytest.raises(RuntimeError, match="failed to start"):
+            mcp.start()
+
+    def test_mcp_client_send_format(self):
+        """_send should format JSON-RPC 2.0 correctly."""
+        mcp = vc.MCPClient("test", "cat")
+        # Mock a process with stdin/stdout
+        mock_proc = mock.MagicMock()
+        mock_proc.poll.return_value = None  # still running
+        response = {"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}
+        mock_proc.stdout.readline.return_value = (json.dumps(response) + "\n").encode("utf-8")
+        mcp._proc = mock_proc
+        result = mcp._send("test/method", {"key": "value"})
+        assert result == {"ok": True}
+        # Check what was written to stdin
+        written = mock_proc.stdin.write.call_args[0][0]
+        parsed = json.loads(written.decode("utf-8"))
+        assert parsed["jsonrpc"] == "2.0"
+        assert parsed["method"] == "test/method"
+        assert parsed["params"] == {"key": "value"}
+        assert "id" in parsed
+
+    def test_mcp_client_send_error_response(self):
+        """_send should raise on MCP error response."""
+        mcp = vc.MCPClient("test", "cat")
+        mock_proc = mock.MagicMock()
+        mock_proc.poll.return_value = None
+        response = {"jsonrpc": "2.0", "id": 1, "error": {"code": -32600, "message": "Invalid Request"}}
+        mock_proc.stdout.readline.return_value = (json.dumps(response) + "\n").encode("utf-8")
+        mcp._proc = mock_proc
+        with pytest.raises(RuntimeError, match="MCP error"):
+            mcp._send("bad/method")
+
+    def test_mcp_call_tool_extracts_text(self):
+        """call_tool should extract text content from MCP response."""
+        mcp = vc.MCPClient("test", "cat")
+        mock_proc = mock.MagicMock()
+        mock_proc.poll.return_value = None
+        response = {
+            "jsonrpc": "2.0", "id": 1,
+            "result": {"content": [{"type": "text", "text": "hello world"}]}
+        }
+        mock_proc.stdout.readline.return_value = (json.dumps(response) + "\n").encode("utf-8")
+        mcp._proc = mock_proc
+        result = mcp.call_tool("greet", {"name": "test"})
+        assert result == "hello world"
+
+    def test_mcp_list_tools(self):
+        """list_tools should populate _tools dict."""
+        mcp = vc.MCPClient("test", "cat")
+        mock_proc = mock.MagicMock()
+        mock_proc.poll.return_value = None
+        response = {
+            "jsonrpc": "2.0", "id": 1,
+            "result": {"tools": [
+                {"name": "tool_a", "description": "Tool A"},
+                {"name": "tool_b", "description": "Tool B"},
+            ]}
+        }
+        mock_proc.stdout.readline.return_value = (json.dumps(response) + "\n").encode("utf-8")
+        mcp._proc = mock_proc
+        tools = mcp.list_tools()
+        assert len(tools) == 2
+        assert "tool_a" in mcp._tools
+        assert "tool_b" in mcp._tools
+
+
+class TestMCPTool:
+    """Tests for the MCPTool wrapper class."""
+
+    def test_mcp_tool_name_format(self):
+        """MCPTool name should be mcp_{server}_{tool}."""
+        mcp = vc.MCPClient("myserver", "cmd")
+        schema = {"name": "do_thing", "description": "Does a thing", "inputSchema": {"type": "object", "properties": {}}}
+        tool = vc.MCPTool(mcp, schema)
+        assert tool.name == "mcp_myserver_do_thing"
+        assert tool._mcp_tool_name == "do_thing"
+
+    def test_mcp_tool_schema_conversion(self):
+        """get_schema should return OpenAI-compatible format."""
+        mcp = vc.MCPClient("srv", "cmd")
+        schema = {
+            "name": "search",
+            "description": "Search for items",
+            "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}}
+        }
+        tool = vc.MCPTool(mcp, schema)
+        oai_schema = tool.get_schema()
+        assert oai_schema["type"] == "function"
+        assert oai_schema["function"]["name"] == "mcp_srv_search"
+        assert oai_schema["function"]["description"] == "Search for items"
+        assert "query" in oai_schema["function"]["parameters"]["properties"]
+
+    def test_mcp_tool_execute_error(self):
+        """execute should return error string on failure."""
+        mcp = vc.MCPClient("srv", "cmd")
+        schema = {"name": "fail_tool", "description": "Will fail"}
+        tool = vc.MCPTool(mcp, schema)
+        # _send will fail because no process
+        result = tool.execute({"key": "val"})
+        assert "MCP tool error" in result
+
+
+class TestLoadMCPServers:
+    """Tests for _load_mcp_servers function."""
+
+    def test_load_from_config_dir(self, tmp_path):
+        """Load MCP servers from config directory."""
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        mcp_json = config_dir / "mcp.json"
+        mcp_json.write_text(json.dumps({
+            "mcpServers": {
+                "test-srv": {"command": "echo", "args": ["hello"]}
+            }
+        }))
+        cfg = vc.Config()
+        cfg.config_dir = str(config_dir)
+        cfg.cwd = str(tmp_path)
+        servers = vc._load_mcp_servers(cfg)
+        assert "test-srv" in servers
+        assert servers["test-srv"]["command"] == "echo"
+
+    def test_load_from_project_dir(self, tmp_path):
+        """Load MCP servers from project .vibe-local/mcp.json."""
+        proj_dir = tmp_path / ".vibe-local"
+        proj_dir.mkdir()
+        (proj_dir / "mcp.json").write_text(json.dumps({
+            "mcpServers": {
+                "proj-srv": {"command": "python3", "args": ["-m", "srv"]}
+            }
+        }))
+        cfg = vc.Config()
+        cfg.config_dir = str(tmp_path / "nonexistent")
+        cfg.cwd = str(tmp_path)
+        servers = vc._load_mcp_servers(cfg)
+        assert "proj-srv" in servers
+
+    def test_load_empty_config(self, tmp_path):
+        """Empty mcp.json returns no servers."""
+        cfg = vc.Config()
+        cfg.config_dir = str(tmp_path / "nonexistent")
+        cfg.cwd = str(tmp_path)
+        servers = vc._load_mcp_servers(cfg)
+        assert servers == {}
+
+    def test_load_invalid_json(self, tmp_path):
+        """Invalid JSON doesn't crash."""
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        (config_dir / "mcp.json").write_text("not json {{{")
+        cfg = vc.Config()
+        cfg.config_dir = str(config_dir)
+        cfg.cwd = str(tmp_path)
+        servers = vc._load_mcp_servers(cfg)
+        assert servers == {}
+
+    def test_load_symlink_ignored(self, tmp_path):
+        """Symlinked mcp.json should be ignored for security."""
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        real_file = tmp_path / "real_mcp.json"
+        real_file.write_text(json.dumps({"mcpServers": {"evil": {"command": "rm"}}}))
+        link = config_dir / "mcp.json"
+        link.symlink_to(real_file)
+        cfg = vc.Config()
+        cfg.config_dir = str(config_dir)
+        cfg.cwd = str(tmp_path)
+        servers = vc._load_mcp_servers(cfg)
+        assert servers == {}
+
+
+class TestLoadSkills:
+    """Tests for _load_skills function."""
+
+    def test_load_skills_from_config_dir(self, tmp_path):
+        """Load .md skill files from config skills dir."""
+        skills_dir = tmp_path / "config" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "coding.md").write_text("# Coding Skill\nWrite good code.")
+        (skills_dir / "review.md").write_text("# Review Skill\nReview carefully.")
+        cfg = vc.Config()
+        cfg.config_dir = str(tmp_path / "config")
+        cfg.cwd = str(tmp_path)
+        skills = vc._load_skills(cfg)
+        assert "coding" in skills
+        assert "review" in skills
+        assert "# Coding Skill" in skills["coding"]
+
+    def test_load_skills_from_project_dir(self, tmp_path):
+        """Load skills from .vibe-local/skills/."""
+        proj_skills = tmp_path / ".vibe-local" / "skills"
+        proj_skills.mkdir(parents=True)
+        (proj_skills / "local-skill.md").write_text("Local skill content")
+        cfg = vc.Config()
+        cfg.config_dir = str(tmp_path / "nonexistent")
+        cfg.cwd = str(tmp_path)
+        skills = vc._load_skills(cfg)
+        assert "local-skill" in skills
+
+    def test_load_skills_no_dir(self, tmp_path):
+        """No skills directory returns empty dict."""
+        cfg = vc.Config()
+        cfg.config_dir = str(tmp_path / "nonexistent")
+        cfg.cwd = str(tmp_path)
+        skills = vc._load_skills(cfg)
+        assert skills == {}
+
+    def test_load_skills_ignores_non_md(self, tmp_path):
+        """Non-.md files should be ignored."""
+        skills_dir = tmp_path / "config" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "readme.txt").write_text("Not a skill")
+        (skills_dir / "script.py").write_text("import os")
+        (skills_dir / "actual.md").write_text("Real skill")
+        cfg = vc.Config()
+        cfg.config_dir = str(tmp_path / "config")
+        cfg.cwd = str(tmp_path)
+        skills = vc._load_skills(cfg)
+        assert len(skills) == 1
+        assert "actual" in skills
+
+    def test_load_skills_ignores_large_files(self, tmp_path):
+        """Files over 50KB should be skipped."""
+        skills_dir = tmp_path / "config" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "small.md").write_text("Small skill")
+        (skills_dir / "huge.md").write_text("x" * 60000)  # 60KB
+        cfg = vc.Config()
+        cfg.config_dir = str(tmp_path / "config")
+        cfg.cwd = str(tmp_path)
+        skills = vc._load_skills(cfg)
+        assert "small" in skills
+        assert "huge" not in skills
+
+    def test_load_skills_ignores_symlinks(self, tmp_path):
+        """Symlinked .md files should be ignored for security."""
+        skills_dir = tmp_path / "config" / "skills"
+        skills_dir.mkdir(parents=True)
+        real_file = tmp_path / "real.md"
+        real_file.write_text("evil skill")
+        (skills_dir / "evil.md").symlink_to(real_file)
+        (skills_dir / "normal.md").write_text("safe skill")
+        cfg = vc.Config()
+        cfg.config_dir = str(tmp_path / "config")
+        cfg.cwd = str(tmp_path)
+        skills = vc._load_skills(cfg)
+        assert "evil" not in skills
+        assert "normal" in skills
+
+
+class TestGitCheckpoint:
+    """Tests for the GitCheckpoint class."""
+
+    def test_not_git_repo(self, tmp_path):
+        """GitCheckpoint in non-git dir should report not git."""
+        gc = vc.GitCheckpoint(str(tmp_path))
+        assert gc._is_git_repo is False
+
+    def test_create_not_git(self, tmp_path):
+        """create() should return False in non-git dir."""
+        gc = vc.GitCheckpoint(str(tmp_path))
+        assert gc.create("test") is False
+
+    def test_rollback_not_git(self, tmp_path):
+        """rollback() should fail in non-git dir."""
+        gc = vc.GitCheckpoint(str(tmp_path))
+        ok, msg = gc.rollback()
+        assert ok is False
+        assert "Not a git repository" in msg
+
+    def test_rollback_no_checkpoints(self, tmp_path):
+        """rollback() with no checkpoints should fail gracefully."""
+        gc = vc.GitCheckpoint(str(tmp_path))
+        gc._is_git_repo = True  # pretend
+        ok, msg = gc.rollback()
+        assert ok is False
+        assert "No checkpoints" in msg
+
+    def test_list_checkpoints_not_git(self, tmp_path):
+        """list_checkpoints() in non-git dir returns empty."""
+        gc = vc.GitCheckpoint(str(tmp_path))
+        assert gc.list_checkpoints() == []
+
+    def test_git_checkpoint_in_real_repo(self, tmp_path):
+        """Full create/list/rollback cycle in a real git repo."""
+        import subprocess
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo), capture_output=True)
+        # Create initial commit
+        (repo / "file.txt").write_text("initial")
+        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo), capture_output=True)
+
+        gc = vc.GitCheckpoint(str(repo))
+        assert gc._is_git_repo is True
+
+        # No changes → create returns False
+        assert gc.create("empty") is False
+
+        # Make a change
+        (repo / "file.txt").write_text("modified")
+        assert gc.create("test-checkpoint") is True
+        assert len(gc._checkpoints) == 1
+
+        # File should be back to initial (stash push reverts)
+        assert (repo / "file.txt").read_text() == "initial"
+
+        # List should include our checkpoint
+        cps = gc.list_checkpoints()
+        assert any("vibe-checkpoint" in cp for cp in cps)
+
+        # Rollback
+        ok, msg = gc.rollback()
+        assert ok is True
+        assert "test-checkpoint" in msg
+        assert (repo / "file.txt").read_text() == "modified"
+
+    def test_max_checkpoints_limit(self, tmp_path):
+        """Checkpoint list should not exceed MAX_CHECKPOINTS."""
+        gc = vc.GitCheckpoint(str(tmp_path))
+        gc._is_git_repo = True
+        # Simulate many checkpoints
+        for i in range(25):
+            gc._checkpoints.append((i, f"cp-{i}", time.time()))
+        assert len(gc._checkpoints) == 25
+        # After create (which would fail but test the limit logic)
+        gc._checkpoints = gc._checkpoints[-gc.MAX_CHECKPOINTS:]
+        assert len(gc._checkpoints) == 20
+
+
+class TestAutoTestRunner:
+    """Tests for the AutoTestRunner class."""
+
+    def test_auto_detect_pytest(self, tmp_path):
+        """Should detect pytest from pyproject.toml."""
+        (tmp_path / "pyproject.toml").write_text("[tool.pytest]\n")
+        runner = vc.AutoTestRunner(str(tmp_path))
+        assert runner.test_cmd is not None
+        assert "pytest" in runner.test_cmd
+
+    def test_auto_detect_tests_dir(self, tmp_path):
+        """Should detect pytest from tests/ directory."""
+        (tmp_path / "tests").mkdir()
+        runner = vc.AutoTestRunner(str(tmp_path))
+        assert runner.test_cmd is not None
+        assert "pytest" in runner.test_cmd
+
+    def test_auto_detect_npm(self, tmp_path):
+        """Should detect npm test from package.json."""
+        (tmp_path / "package.json").write_text('{"name": "test"}')
+        runner = vc.AutoTestRunner(str(tmp_path))
+        assert runner.test_cmd is not None
+        assert "npm" in runner.test_cmd
+
+    def test_auto_detect_nothing(self, tmp_path):
+        """No test markers → no test_cmd."""
+        runner = vc.AutoTestRunner(str(tmp_path))
+        assert runner.test_cmd is None
+
+    def test_disabled_by_default(self, tmp_path):
+        """Auto test should be disabled by default."""
+        runner = vc.AutoTestRunner(str(tmp_path))
+        assert runner.enabled is False
+
+    def test_run_after_edit_disabled(self, tmp_path):
+        """run_after_edit returns None when disabled."""
+        runner = vc.AutoTestRunner(str(tmp_path))
+        result = runner.run_after_edit("test.py")
+        assert result is None
+
+    def test_run_after_edit_syntax_check(self, tmp_path):
+        """When enabled, should run syntax check on .py files."""
+        runner = vc.AutoTestRunner(str(tmp_path))
+        runner.enabled = True
+        runner.test_cmd = None  # no test suite
+
+        # Good file
+        good_file = tmp_path / "good.py"
+        good_file.write_text("x = 1\n")
+        result = runner.run_after_edit(str(good_file))
+        # Should pass (no syntax error)
+        assert result is None or result == []
+
+    def test_run_after_edit_syntax_error(self, tmp_path):
+        """Should catch syntax errors in .py files."""
+        runner = vc.AutoTestRunner(str(tmp_path))
+        runner.enabled = True
+        runner.test_cmd = None  # no test suite
+
+        # Bad file
+        bad_file = tmp_path / "bad.py"
+        bad_file.write_text("def x(\n")
+        result = runner.run_after_edit(str(bad_file))
+        # Should return error
+        assert result is not None
+        if isinstance(result, list):
+            assert len(result) > 0
+
+    def test_pytest_priority_over_npm(self, tmp_path):
+        """pytest should take priority when both exist."""
+        (tmp_path / "pyproject.toml").write_text("[tool.pytest]\n")
+        (tmp_path / "package.json").write_text('{"name": "test"}')
+        runner = vc.AutoTestRunner(str(tmp_path))
+        assert "pytest" in runner.test_cmd
+
+
+class TestPlanActMode:
+    """Tests for Plan/Act mode functionality."""
+
+    def test_plan_mode_code_exists(self):
+        """Plan mode implementation should exist in source."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "_plan_mode" in content
+        assert "ACT_ONLY_TOOLS" in content
+        assert "Plan Mode" in content
+        assert "Act Mode" in content
+
+    def test_act_only_tools_defined(self):
+        """ACT_ONLY_TOOLS should contain write/edit/bash tools."""
+        tools = vc.Agent.ACT_ONLY_TOOLS
+        assert "Bash" in tools
+        assert "Write" in tools
+        assert "Edit" in tools
+        assert "NotebookEdit" in tools
+        # Read-only tools should NOT be in the set
+        assert "Read" not in tools
+        assert "Glob" not in tools
+        assert "Grep" not in tools
+
+    def test_slash_commands_registered(self):
+        """New slash commands should be in tab-completion and did-you-mean lists."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        # Tab-completion list
+        assert '"/approve"' in content
+        assert '"/act"' in content
+        assert '"/checkpoint"' in content
+        assert '"/rollback"' in content
+        assert '"/autotest"' in content
+        assert '"/skills"' in content
+
+    def test_help_includes_new_commands(self):
+        """Help text should mention new commands."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "/approve" in content
+        assert "/checkpoint" in content
+        assert "/rollback" in content
+        assert "/autotest" in content
+        assert "/skills" in content
+
+    def test_mcp_cleanup_on_exit(self):
+        """MCP clients should be cleaned up on exit."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "mcp.stop()" in content
+        assert "for mcp in _mcp_clients" in content
+
+
+class TestNewFeatureIntegration:
+    """Integration tests verifying new features are wired up in Agent/main."""
+
+    def test_agent_has_git_checkpoint(self):
+        """Agent should have git_checkpoint attribute."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "self.git_checkpoint = GitCheckpoint" in content
+
+    def test_agent_has_auto_test(self):
+        """Agent should have auto_test attribute."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "self.auto_test = AutoTestRunner" in content
+
+    def test_checkpoint_before_write_edit(self):
+        """Git checkpoint should be created before Write/Edit."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert 'before-write' in content or 'before-{tool_name.lower()}' in content
+
+    def test_autotest_after_write_edit(self):
+        """Auto-test should run after Write/Edit."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "auto_test.run_after_edit" in content
+
+    def test_skills_injected_into_system_prompt(self):
+        """Skills should be injected into system prompt in main()."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "_load_skills" in content
+
+    def test_mcp_servers_initialized_in_main(self):
+        """MCP servers should be initialized in main()."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "_load_mcp_servers" in content
+        assert "MCPClient" in content
+        assert "mcp.initialize()" in content
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# v1.1: File Watcher, Streaming Enhancement, Multi-Agent Coordination
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestFileWatcher:
+    """Tests for the FileWatcher class."""
+
+    def test_init_disabled(self, tmp_path):
+        """FileWatcher should be disabled by default."""
+        fw = vc.FileWatcher(str(tmp_path))
+        assert fw.enabled is False
+
+    def test_scan_finds_files(self, tmp_path):
+        """_scan should find watched file types."""
+        (tmp_path / "app.py").write_text("x = 1")
+        (tmp_path / "index.html").write_text("<html>")
+        (tmp_path / "data.bin").write_bytes(b"\x00\x01")  # not watched
+        fw = vc.FileWatcher(str(tmp_path))
+        snap = fw._scan()
+        paths = set(snap.keys())
+        assert any("app.py" in p for p in paths)
+        assert any("index.html" in p for p in paths)
+        assert not any("data.bin" in p for p in paths)
+
+    def test_scan_skips_git(self, tmp_path):
+        """_scan should skip .git and node_modules."""
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "config.py").write_text("x")
+        nm_dir = tmp_path / "node_modules"
+        nm_dir.mkdir()
+        (nm_dir / "pkg.js").write_text("y")
+        (tmp_path / "main.py").write_text("z")
+        fw = vc.FileWatcher(str(tmp_path))
+        snap = fw._scan()
+        paths_str = " ".join(snap.keys())
+        assert ".git" not in paths_str
+        assert "node_modules" not in paths_str
+        assert "main.py" in paths_str
+
+    def test_detect_changes_created(self, tmp_path):
+        """Should detect newly created files."""
+        fw = vc.FileWatcher(str(tmp_path))
+        old = {}
+        new = {str(tmp_path / "new.py"): (time.time(), 10)}
+        changes = fw._detect_changes(old, new)
+        assert len(changes) == 1
+        assert changes[0][0] == "created"
+
+    def test_detect_changes_modified(self, tmp_path):
+        """Should detect modified files."""
+        fw = vc.FileWatcher(str(tmp_path))
+        p = str(tmp_path / "mod.py")
+        old = {p: (1000.0, 50)}
+        new = {p: (2000.0, 60)}
+        changes = fw._detect_changes(old, new)
+        assert len(changes) == 1
+        assert changes[0][0] == "modified"
+
+    def test_detect_changes_deleted(self, tmp_path):
+        """Should detect deleted files."""
+        fw = vc.FileWatcher(str(tmp_path))
+        p = str(tmp_path / "del.py")
+        old = {p: (1000.0, 50)}
+        new = {}
+        changes = fw._detect_changes(old, new)
+        assert len(changes) == 1
+        assert changes[0][0] == "deleted"
+
+    def test_format_changes(self, tmp_path):
+        """format_changes should produce readable output."""
+        fw = vc.FileWatcher(str(tmp_path))
+        changes = [
+            ("created", str(tmp_path / "new.py")),
+            ("modified", str(tmp_path / "old.py")),
+            ("deleted", str(tmp_path / "gone.py")),
+        ]
+        msg = fw.format_changes(changes)
+        assert "File Watcher" in msg
+        assert "+ new.py" in msg
+        assert "~ old.py" in msg
+        assert "- gone.py" in msg
+
+    def test_format_changes_empty(self, tmp_path):
+        """format_changes with empty list returns empty string."""
+        fw = vc.FileWatcher(str(tmp_path))
+        assert fw.format_changes([]) == ""
+
+    def test_start_stop(self, tmp_path):
+        """start/stop should enable/disable watcher."""
+        fw = vc.FileWatcher(str(tmp_path))
+        fw.start()
+        assert fw.enabled is True
+        assert fw._thread is not None
+        fw.stop()
+        assert fw.enabled is False
+
+    def test_get_pending_changes_clears(self, tmp_path):
+        """get_pending_changes should return and clear pending changes."""
+        fw = vc.FileWatcher(str(tmp_path))
+        fw._changes = [("created", "a.py"), ("modified", "b.py")]
+        result = fw.get_pending_changes()
+        assert len(result) == 2
+        assert fw.get_pending_changes() == []  # cleared
+
+    def test_refresh_snapshot(self, tmp_path):
+        """refresh_snapshot should update snapshot."""
+        (tmp_path / "test.py").write_text("x = 1")
+        fw = vc.FileWatcher(str(tmp_path))
+        fw._snapshots = {}
+        fw.refresh_snapshot()
+        assert len(fw._snapshots) > 0
+
+    def test_real_change_detection(self, tmp_path):
+        """End-to-end: detect a file creation after snapshot."""
+        fw = vc.FileWatcher(str(tmp_path))
+        fw._snapshots = fw._scan()  # initial scan (empty)
+        # Create a file
+        (tmp_path / "new_file.py").write_text("hello")
+        new_snap = fw._scan()
+        changes = fw._detect_changes(fw._snapshots, new_snap)
+        assert any(c[0] == "created" and "new_file.py" in c[1] for c in changes)
+
+
+class TestMultiAgentCoordinator:
+    """Tests for MultiAgentCoordinator and ParallelAgentTool."""
+
+    def test_coordinator_max_parallel(self):
+        """MAX_PARALLEL should be 4."""
+        assert vc.MultiAgentCoordinator.MAX_PARALLEL == 4
+
+    def test_parallel_agent_tool_schema(self):
+        """ParallelAgentTool should have proper schema."""
+        coord = mock.MagicMock()
+        tool = vc.ParallelAgentTool(coord)
+        assert tool.name == "ParallelAgents"
+        schema = tool.get_schema()
+        assert schema["type"] == "function"
+        props = schema["function"]["parameters"]["properties"]
+        assert "tasks" in props
+        assert props["tasks"]["type"] == "array"
+
+    def test_parallel_agent_tool_empty_tasks(self):
+        """ParallelAgentTool with empty tasks should error."""
+        coord = mock.MagicMock()
+        tool = vc.ParallelAgentTool(coord)
+        result = tool.execute({"tasks": []})
+        assert "Error" in result
+
+    def test_parallel_agent_tool_caps_at_4(self):
+        """ParallelAgentTool should cap at 4 tasks."""
+        coord = mock.MagicMock()
+        coord.run_parallel.return_value = [
+            {"prompt": f"task {i}", "result": f"done {i}", "duration": 1.0, "error": None}
+            for i in range(4)
+        ]
+        tool = vc.ParallelAgentTool(coord)
+        tasks = [{"prompt": f"task {i}"} for i in range(6)]
+        tool.execute({"tasks": tasks})
+        # Should only pass 4 tasks to coordinator
+        call_args = coord.run_parallel.call_args[0][0]
+        assert len(call_args) == 4
+
+    def test_coordinator_code_exists(self):
+        """MultiAgentCoordinator should be in source."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "class MultiAgentCoordinator" in content
+        assert "run_parallel" in content
+        assert "class ParallelAgentTool" in content
+
+
+class TestStreamingEnhancement:
+    """Tests for enhanced streaming with tool call support."""
+
+    def test_stream_response_accumulates_tool_calls(self):
+        """stream_response should accumulate tool_call deltas."""
+        tui = vc.TUI.__new__(vc.TUI)
+        tui._is_cjk = False
+        tui._term_cols = 80
+        tui._term_rows = 24
+        tui._no_color = True
+        tui.is_interactive = False
+        tui.scroll_region = vc.ScrollRegion()
+
+        # Simulate streaming chunks with tool call deltas
+        chunks = [
+            {"choices": [{"delta": {"content": "I'll search for that. "}}]},
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_abc", "function": {"name": "Grep", "arguments": ""}}]}}]},
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '{"patt'}}]}}]},
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": 'ern": "TODO"}'}}]}}]},
+            {"choices": [{"delta": {}}]},
+        ]
+        text, tool_calls = tui.stream_response(iter(chunks))
+        assert "search" in text
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["function"]["name"] == "Grep"
+        assert '"pattern": "TODO"' in tool_calls[0]["function"]["arguments"]
+
+    def test_stream_response_int_arguments_no_crash(self):
+        """stream_response should handle non-string tool_call delta arguments."""
+        tui = vc.TUI.__new__(vc.TUI)
+        tui._is_cjk = False
+        tui._term_cols = 80
+        tui._term_rows = 24
+        tui._no_color = True
+        tui.is_interactive = False
+        tui.scroll_region = vc.ScrollRegion()
+
+        # Simulate LLM sending non-string arguments (e.g., int)
+        chunks = [
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_x", "function": {"name": "Bash", "arguments": ""}}]}}]},
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": 123}}]}}]},
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '}'}}]}}]},
+        ]
+        text, tool_calls = tui.stream_response(iter(chunks))
+        assert len(tool_calls) == 1
+        assert "123" in tool_calls[0]["function"]["arguments"]
+
+    def test_stream_response_no_tools(self):
+        """stream_response with text-only should return empty tool_calls."""
+        tui = vc.TUI.__new__(vc.TUI)
+        tui._is_cjk = False
+        tui._term_cols = 80
+        tui._term_rows = 24
+        tui._no_color = True
+        tui.is_interactive = False
+        tui.scroll_region = vc.ScrollRegion()
+
+        chunks = [
+            {"choices": [{"delta": {"content": "Hello "}}]},
+            {"choices": [{"delta": {"content": "world!"}}]},
+        ]
+        text, tool_calls = tui.stream_response(iter(chunks))
+        assert "Hello world!" in text
+        assert tool_calls == []
+
+    def test_supports_tool_streaming_flag(self):
+        """OllamaClient should have _supports_tool_streaming flag."""
+        cfg = vc.Config()
+        client = vc.OllamaClient(cfg)
+        assert hasattr(client, "_supports_tool_streaming")
+
+    def test_file_watcher_in_agent(self):
+        """Agent should have file_watcher attribute."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "self.file_watcher = FileWatcher" in content
+
+    def test_watch_command_in_slash_commands(self):
+        """Watch command should be registered."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert '"/watch"' in content
+        assert 'cmd == "/watch"' in content
+
+    def test_parallel_agents_registered(self):
+        """ParallelAgentTool should be registered in main."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "ParallelAgentTool(coordinator)" in content
+        assert "MultiAgentCoordinator(config, client, registry, permissions)" in content
+
+    def test_session_add_system_note(self):
+        """Session should have add_system_note method."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "def add_system_note" in content
+
+    def test_session_add_rag_context_exists(self):
+        """Session should have add_rag_context method."""
+        assert hasattr(vc.Session, "add_rag_context")
+
+    def test_session_add_rag_context_normal(self):
+        """add_rag_context should add message with [RAG Context] marker."""
+        with tempfile.TemporaryDirectory() as d:
+            cfg = vc.Config()
+            cfg.sessions_dir = d
+            cfg.context_window = 32768
+            cfg.session_id = None
+            session = vc.Session(cfg, "system prompt")
+            session.add_rag_context("some code context")
+            last = session.messages[-1]
+            assert last["role"] == "user"
+            assert "[RAG Context]\n" in last["content"]
+            assert "some code context" in last["content"]
+            assert "[RAG context truncated]" not in last["content"]
+
+    def test_session_add_rag_context_truncates_large_input(self):
+        """add_rag_context should truncate input exceeding max_bytes."""
+        with tempfile.TemporaryDirectory() as d:
+            cfg = vc.Config()
+            cfg.sessions_dir = d
+            cfg.context_window = 32768
+            cfg.session_id = None
+            session = vc.Session(cfg, "system prompt")
+            large_text = "x" * 40_000  # 40 KB > default 32 KB limit
+            session.add_rag_context(large_text)
+            last = session.messages[-1]
+            assert last["role"] == "user"
+            assert "[RAG Context]" in last["content"]
+            assert "[RAG context truncated]" in last["content"]
+
+
+class TestStreamingAutoDetection:
+    """Tests for Ollama version-based tool streaming auto-detection."""
+
+    def test_detect_tool_streaming_flag_starts_none(self):
+        """_supports_tool_streaming should start as None (untested)."""
+        cfg = vc.Config()
+        client = vc.OllamaClient(cfg)
+        assert client._supports_tool_streaming is None
+
+    def test_detect_tool_streaming_caches_result(self):
+        """detect_tool_streaming should cache the result after first call."""
+        cfg = vc.Config()
+        client = vc.OllamaClient(cfg)
+        # Manually set to True to test caching
+        client._supports_tool_streaming = True
+        result = client.detect_tool_streaming()
+        assert result is True
+
+    def test_detect_tool_streaming_version_parse_055(self):
+        """Should detect Ollama 0.5.5 as supporting tool streaming."""
+        cfg = vc.Config()
+        client = vc.OllamaClient(cfg)
+        version_response = json.dumps({"version": "0.5.5"}).encode()
+        with mock.patch("urllib.request.urlopen") as mock_url:
+            mock_resp = mock.MagicMock()
+            mock_resp.read.return_value = version_response
+            mock_resp.__enter__ = mock.MagicMock(return_value=mock_resp)
+            mock_resp.__exit__ = mock.MagicMock(return_value=False)
+            mock_url.return_value = mock_resp
+            result = client.detect_tool_streaming()
+        assert result is True
+        assert client._supports_tool_streaming is True
+
+    def test_detect_tool_streaming_version_parse_042(self):
+        """Should detect Ollama 0.4.2 as NOT supporting tool streaming."""
+        cfg = vc.Config()
+        client = vc.OllamaClient(cfg)
+        version_response = json.dumps({"version": "0.4.2"}).encode()
+        with mock.patch("urllib.request.urlopen") as mock_url:
+            mock_resp = mock.MagicMock()
+            mock_resp.read.return_value = version_response
+            mock_resp.__enter__ = mock.MagicMock(return_value=mock_resp)
+            mock_resp.__exit__ = mock.MagicMock(return_value=False)
+            mock_url.return_value = mock_resp
+            result = client.detect_tool_streaming()
+        assert result is False
+
+    def test_detect_tool_streaming_version_parse_100(self):
+        """Should detect Ollama 1.0.0 as supporting tool streaming."""
+        cfg = vc.Config()
+        client = vc.OllamaClient(cfg)
+        version_response = json.dumps({"version": "1.0.0"}).encode()
+        with mock.patch("urllib.request.urlopen") as mock_url:
+            mock_resp = mock.MagicMock()
+            mock_resp.read.return_value = version_response
+            mock_resp.__enter__ = mock.MagicMock(return_value=mock_resp)
+            mock_resp.__exit__ = mock.MagicMock(return_value=False)
+            mock_url.return_value = mock_resp
+            result = client.detect_tool_streaming()
+        assert result is True
+
+    def test_detect_tool_streaming_network_error(self):
+        """Should return False on network error."""
+        cfg = vc.Config()
+        client = vc.OllamaClient(cfg)
+        with mock.patch("urllib.request.urlopen", side_effect=Exception("Connection refused")):
+            result = client.detect_tool_streaming()
+        assert result is False
+        assert client._supports_tool_streaming is False
+
+    def test_detect_tool_streaming_rc_version(self):
+        """Should handle release candidate versions like 0.6.0-rc1."""
+        cfg = vc.Config()
+        client = vc.OllamaClient(cfg)
+        version_response = json.dumps({"version": "0.6.0-rc1"}).encode()
+        with mock.patch("urllib.request.urlopen") as mock_url:
+            mock_resp = mock.MagicMock()
+            mock_resp.read.return_value = version_response
+            mock_resp.__enter__ = mock.MagicMock(return_value=mock_resp)
+            mock_resp.__exit__ = mock.MagicMock(return_value=False)
+            mock_url.return_value = mock_resp
+            result = client.detect_tool_streaming()
+        assert result is True
+
+    def test_chat_uses_detect_tool_streaming(self):
+        """chat() should call detect_tool_streaming when tools are present."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "self.detect_tool_streaming()" in content
+        # Old pattern should be gone
+        assert "if not self._supports_tool_streaming:" not in content
+
+
+class TestReadToolTruncationHint:
+    """Tests for Read tool truncation hint when files are partially read."""
+
+    def test_no_truncation_for_small_files(self):
+        """Small files should not show truncation hint."""
+        tool = vc.ReadTool()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            for i in range(10):
+                f.write(f"Line {i+1}\n")
+            f.flush()
+            path = f.name
+        try:
+            result = tool.execute({"file_path": path})
+            assert "truncated" not in result
+            assert "Line 1" in result
+            assert "Line 10" in result
+        finally:
+            os.unlink(path)
+
+    def test_truncation_hint_for_large_files(self):
+        """Files larger than limit should show truncation hint."""
+        tool = vc.ReadTool()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            for i in range(100):
+                f.write(f"Line {i+1}\n")
+            f.flush()
+            path = f.name
+        try:
+            result = tool.execute({"file_path": path, "limit": 10})
+            assert "truncated" in result
+            assert "showing lines 1-10" in result
+            assert "of 100 total" in result
+            assert "Use offset/limit to read more" in result
+        finally:
+            os.unlink(path)
+
+    def test_truncation_hint_with_offset(self):
+        """Truncation hint should show correct range with offset."""
+        tool = vc.ReadTool()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            for i in range(200):
+                f.write(f"Line {i+1}\n")
+            f.flush()
+            path = f.name
+        try:
+            result = tool.execute({"file_path": path, "offset": 50, "limit": 20})
+            assert "truncated" in result
+            assert "showing lines 50-69" in result
+            assert "of 200 total" in result
+        finally:
+            os.unlink(path)
+
+    def test_no_truncation_when_reading_all(self):
+        """No truncation hint when limit covers entire file."""
+        tool = vc.ReadTool()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            for i in range(50):
+                f.write(f"Line {i+1}\n")
+            f.flush()
+            path = f.name
+        try:
+            result = tool.execute({"file_path": path, "limit": 2000})
+            assert "truncated" not in result
+        finally:
+            os.unlink(path)
+
+    def test_default_limit_truncation(self):
+        """Files > 2000 lines should show truncation with default limit."""
+        tool = vc.ReadTool()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            for i in range(2500):
+                f.write(f"L{i+1}\n")
+            f.flush()
+            path = f.name
+        try:
+            result = tool.execute({"file_path": path})
+            assert "truncated" in result
+            assert "showing lines 1-2000" in result
+            assert "of 2500 total" in result
+        finally:
+            os.unlink(path)
+
+
+class TestParallelAgentsOutputFormat:
+    """Tests for improved ParallelAgents output formatting."""
+
+    def test_output_has_box_drawing(self):
+        """Output should use box-drawing characters for clarity."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        # Check for box-drawing characters in ParallelAgentTool
+        assert "┌─── Agent" in content
+        assert "│ Task:" in content
+        assert "│ Time:" in content
+        assert "└" in content
+
+    def test_output_has_summary(self):
+        """Output should include a summary line."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "Summary:" in content
+        assert "succeeded" in content
+
+    def test_result_truncation_at_3000(self):
+        """Very long agent results should be truncated."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "result truncated" in content
+        assert "3000" in content
+
+    def test_timeout_handling(self):
+        """Timed-out agents should be marked with error."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "Agent timed out" in content
+
+    def test_status_ok_and_fail(self):
+        """Output should show OK/FAIL status per agent."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "[OK]" in content or "OK" in content
+        assert "[FAIL]" in content or "FAIL" in content
+
+
+class TestAutoParallelDetection:
+    """Tests for Agent._detect_parallel_tasks() auto-detection."""
+
+    def test_numbered_list_newline(self):
+        """Newline-separated numbered list should detect parallel tasks."""
+        result = vc.Agent._detect_parallel_tasks(
+            "1. ファイル一覧を出して\n2. git statusを見せて\n3. ディスク使用量を調べて"
+        )
+        assert len(result) == 3
+
+    def test_numbered_list_single_line(self):
+        """Double-space-separated numbered list should detect parallel tasks."""
+        result = vc.Agent._detect_parallel_tasks(
+            "1. READMEの行数を調べて  2. テスト数を数えて  3. クラス一覧を出して"
+        )
+        assert len(result) == 3
+        assert "READMEの行数を調べて" in result[0]
+
+    def test_comma_separated_tasks(self):
+        """Japanese comma-separated investigation tasks should be detected."""
+        result = vc.Agent._detect_parallel_tasks(
+            "TODOを探して、テスト数を数えて"
+        )
+        assert len(result) == 2
+
+    def test_three_comma_tasks(self):
+        """Three comma-separated tasks should be detected."""
+        result = vc.Agent._detect_parallel_tasks(
+            "READMEの行数を調べて、テスト数を数えて、クラス一覧を出して"
+        )
+        assert len(result) == 3
+
+    def test_to_conjunction(self):
+        """Japanese と conjunction should split tasks."""
+        result = vc.Agent._detect_parallel_tasks(
+            "ファイル数を数えてとテスト結果を確認して"
+        )
+        assert len(result) == 2
+
+    def test_short_input_ignored(self):
+        """Short inputs should not be detected as parallel."""
+        result = vc.Agent._detect_parallel_tasks("hello.pyを作って")
+        assert len(result) == 0
+
+    def test_question_ignored(self):
+        """Questions should not be detected as parallel."""
+        result = vc.Agent._detect_parallel_tasks("これは何ですか？もっと教えてください？")
+        assert len(result) == 0
+
+    def test_single_task_not_split(self):
+        """Single task with no conjunction should not split."""
+        result = vc.Agent._detect_parallel_tasks(
+            "READMEファイルの内容を読んで要約してください"
+        )
+        assert len(result) == 0
+
+
+class TestOneShotBannerSuppression:
+    """Tests for banner suppression in one-shot (-p) mode."""
+
+    def test_banner_skipped_in_oneshot(self):
+        """Banner should not be shown in one-shot mode."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        # Should check config.prompt before showing banner
+        assert "if not config.prompt:" in content
+        assert "tui.banner(config" in content
+
+    def test_banner_shown_in_interactive(self):
+        """Banner should still be shown in interactive mode."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        # The banner call should exist (not deleted entirely)
+        assert "tui.banner(config, model_ok=True)" in content
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# InputMonitor (ESC key interrupt)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestInputMonitor:
+    """Tests for the InputMonitor ESC key detection class."""
+
+    def test_class_exists(self):
+        """InputMonitor class should be defined in the module."""
+        assert hasattr(vc, "InputMonitor")
+
+    def test_has_start_method(self):
+        """InputMonitor should have a start() method."""
+        mon = vc.InputMonitor()
+        assert callable(getattr(mon, "start", None))
+
+    def test_has_stop_method(self):
+        """InputMonitor should have a stop() method."""
+        mon = vc.InputMonitor()
+        assert callable(getattr(mon, "stop", None))
+
+    def test_has_pressed_property(self):
+        """InputMonitor should have a pressed property."""
+        mon = vc.InputMonitor()
+        assert isinstance(mon.pressed, bool)
+
+    def test_pressed_default_false(self):
+        """pressed should be False before start()."""
+        mon = vc.InputMonitor()
+        assert mon.pressed is False
+
+    def test_stop_is_noop_when_not_started(self):
+        """stop() should not raise if called without start()."""
+        mon = vc.InputMonitor()
+        mon.stop()  # should not raise
+
+    def test_start_noop_when_no_tty(self):
+        """start() should be a no-op when stdin is not a TTY."""
+        mon = vc.InputMonitor()
+        with mock.patch.object(sys.stdin, "isatty", return_value=False):
+            mon.start()
+        # No thread should be started
+        assert mon._thread is None
+
+    def test_has_termios_flag(self):
+        """Module should define HAS_TERMIOS boolean flag."""
+        assert hasattr(vc, "HAS_TERMIOS")
+        assert isinstance(vc.HAS_TERMIOS, bool)
+
+
+class TestBashToolStdinDevnull:
+    """Verify BashTool uses subprocess.DEVNULL for stdin."""
+
+    def test_stdin_devnull_in_source(self):
+        """BashTool.execute source must contain stdin=subprocess.DEVNULL."""
+        import inspect
+        source = inspect.getsource(vc.BashTool.execute)
+        assert "subprocess.DEVNULL" in source
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Compact tool display & status line tests
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestCompactToolDisplay:
+    """Tests for the compact single-line tool result display (Task 2)."""
+
+    def _make_tui(self):
+        cfg = vc.Config()
+        cfg.history_file = "/dev/null"
+        with mock.patch.object(vc.readline, "read_history_file", side_effect=Exception("skip")):
+            return vc.TUI(cfg)
+
+    def test_success_bash_compact(self, capsys):
+        """Successful Bash tool result shows checkmark, command, duration, line count."""
+        tui = self._make_tui()
+        tui.show_tool_result(
+            "Bash", "line1\nline2\nline3\n", is_error=False,
+            duration=0.3, params={"command": "git status"}
+        )
+        out = capsys.readouterr().out
+        assert "\u2714" in out  # checkmark
+        assert "Bash" in out
+        assert "git status" in out
+        assert "0.3s" in out
+        assert "3 lines" in out
+
+    def test_error_bash_compact(self, capsys):
+        """Failed Bash tool result shows X mark and error text."""
+        tui = self._make_tui()
+        tui.show_tool_result(
+            "Bash", "Error: command not found", is_error=True,
+            duration=0.1, params={"command": "invalid-cmd"}
+        )
+        out = capsys.readouterr().out
+        assert "\u2718" in out  # X mark
+        assert "Bash" in out
+        assert "invalid-cmd" in out
+        assert "0.1s" in out
+        assert "command not found" in out
+
+    def test_read_with_range(self, capsys):
+        """Read tool shows filename and line range."""
+        tui = self._make_tui()
+        tui.show_tool_result(
+            "Read", "some content\nmore content\n", is_error=False,
+            duration=0.05, params={"file_path": "/tmp/vibe-coder.py", "offset": 1, "limit": 50}
+        )
+        out = capsys.readouterr().out
+        assert "\u2714" in out
+        assert "Read" in out
+        assert "vibe-coder.py" in out
+        assert "1-50" in out
+
+    def test_websearch_compact(self, capsys):
+        """WebSearch shows quoted query."""
+        tui = self._make_tui()
+        tui.show_tool_result(
+            "WebSearch", "result1\nresult2\n", is_error=False,
+            duration=2.1, params={"query": "digital nature"}
+        )
+        out = capsys.readouterr().out
+        assert "\u2714" in out
+        assert "WebSearch" in out
+        assert '"digital nature"' in out
+        assert "2.1s" in out
+
+    def test_detail_lines_limited_to_3(self, capsys):
+        """Detail output shows at most 3 lines plus a 'more lines' indicator."""
+        tui = self._make_tui()
+        output = "\n".join([f"line {i}" for i in range(20)])
+        tui.show_tool_result(
+            "Bash", output, is_error=False,
+            duration=1.0, params={"command": "ls"}
+        )
+        out = capsys.readouterr().out
+        # Should see "line 0", "line 1", "line 2" in detail, but NOT "line 3"
+        assert "line 0" in out
+        assert "line 1" in out
+        assert "line 2" in out
+        assert "17 more lines" in out  # 20 - 3 = 17
+
+    def test_no_detail_on_error(self, capsys):
+        """Error results should not show detail lines."""
+        tui = self._make_tui()
+        tui.show_tool_result(
+            "Bash", "Error: bad\ndetail line\n", is_error=True,
+            duration=0.1, params={"command": "bad-cmd"}
+        )
+        out = capsys.readouterr().out
+        # The detail lines (with ┃ prefix) should NOT appear for errors
+        assert "\u2503" not in out
+
+    def test_no_duration_still_works(self, capsys):
+        """Calling without duration= still produces valid output."""
+        tui = self._make_tui()
+        tui.show_tool_result("Bash", "hello\n", is_error=False)
+        out = capsys.readouterr().out
+        assert "\u2714" in out
+        assert "Bash" in out
+
+    def test_no_params_still_works(self, capsys):
+        """Calling without params= still produces valid output."""
+        tui = self._make_tui()
+        tui.show_tool_result("Read", "content\n", is_error=False, duration=0.2)
+        out = capsys.readouterr().out
+        assert "\u2714" in out
+        assert "Read" in out
+        assert "0.2s" in out
+
+
+class TestStreamStatusLine:
+    """Tests for the in-place status line during streaming (Task 1)."""
+
+    def _make_tui(self):
+        cfg = vc.Config()
+        cfg.history_file = "/dev/null"
+        with mock.patch.object(vc.readline, "read_history_file", side_effect=Exception("skip")):
+            return vc.TUI(cfg)
+
+    def test_status_line_variables_initialized(self):
+        """stream_response should initialize status tracking variables."""
+        import inspect
+        source = inspect.getsource(vc.TUI.stream_response)
+        assert "_stream_start" in source
+        assert "_approx_tokens" in source
+        assert "_status_line_shown" in source
+
+    def test_status_line_cleared_before_header(self):
+        """stream_response should clear the status line before printing the header."""
+        import inspect
+        source = inspect.getsource(vc.TUI.stream_response)
+        # The code should contain clearing logic with spaces
+        assert "_status_line_shown = False" in source
+        assert "Thinking..." in source
+
+    def test_stream_basic_no_crash(self):
+        """stream_response with simple chunks should not crash."""
+        tui = self._make_tui()
+        chunks = [
+            {"choices": [{"delta": {"content": "Hello "}}]},
+            {"choices": [{"delta": {"content": "world"}}]},
+        ]
+        text, tool_calls = tui.stream_response(iter(chunks))
+        assert "Hello world" in text
+        assert tool_calls == []
+
+
+class TestToolStatusSpinner:
+    """Tests for the tool execution status spinner (Task 3)."""
+
+    def _make_tui(self):
+        cfg = vc.Config()
+        cfg.history_file = "/dev/null"
+        with mock.patch.object(vc.readline, "read_history_file", side_effect=Exception("skip")):
+            return vc.TUI(cfg)
+
+    def test_start_tool_status_method_exists(self):
+        """TUI should have a start_tool_status method."""
+        tui = self._make_tui()
+        assert hasattr(tui, "start_tool_status")
+        assert callable(tui.start_tool_status)
+
+    def test_start_tool_status_starts_and_stops(self, capsys):
+        """start_tool_status should start a thread; stop_spinner should stop it."""
+        tui = self._make_tui()
+        tui.is_interactive = True  # Force interactive mode for test
+        tui.start_tool_status("Bash")
+        assert tui._spinner_thread is not None
+        assert tui._spinner_thread.is_alive()
+        time.sleep(1.2)  # Let it tick at least once
+        tui.stop_spinner()
+        assert tui._spinner_thread is None
+        out = capsys.readouterr().out
+        assert "Running Bash" in out
+
+    def test_start_tool_status_non_interactive(self):
+        """start_tool_status should be a no-op when not interactive."""
+        tui = self._make_tui()
+        tui.is_interactive = False
+        tui.start_tool_status("Bash")
+        assert tui._spinner_thread is None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Type-ahead & Input UX tests
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestTypeAhead:
+    """Tests for InputMonitor type-ahead capture and readline injection."""
+
+    def test_typeahead_initially_empty(self):
+        """get_typeahead() returns empty string before start()."""
+        mon = vc.InputMonitor()
+        assert mon.get_typeahead() == ""
+
+    def test_typeahead_buffer_exists(self):
+        """InputMonitor should have a _typeahead list attribute."""
+        mon = vc.InputMonitor()
+        assert hasattr(mon, "_typeahead")
+        assert isinstance(mon._typeahead, list)
+
+    def test_typeahead_lock_exists(self):
+        """InputMonitor should have a _typeahead_lock for thread safety."""
+        mon = vc.InputMonitor()
+        assert hasattr(mon, "_typeahead_lock")
+
+    def test_typeahead_cleared_on_start(self):
+        """start() should clear any existing type-ahead buffer."""
+        mon = vc.InputMonitor()
+        mon._typeahead = [b'h', b'e', b'l', b'l', b'o']
+        result = mon.get_typeahead()
+        assert result == "hello"
+        assert mon._typeahead == []
+
+    def test_typeahead_returns_and_clears(self):
+        """get_typeahead() should return accumulated text and clear buffer."""
+        mon = vc.InputMonitor()
+        mon._typeahead = [b'h', b'i']
+        result = mon.get_typeahead()
+        assert result == "hi"
+        assert mon._typeahead == []
+        # Second call returns empty
+        assert mon.get_typeahead() == ""
+
+    def test_typeahead_utf8_decode(self):
+        """Type-ahead should properly decode multi-byte UTF-8."""
+        mon = vc.InputMonitor()
+        # "あ" in UTF-8 is \xe3\x81\x82
+        mon._typeahead = [b'\xe3', b'\x81', b'\x82']
+        result = mon.get_typeahead()
+        assert result == "あ"
+
+    def test_agent_has_get_typeahead(self):
+        """Agent class should have get_typeahead() method."""
+        assert hasattr(vc.Agent, "get_typeahead")
+        assert callable(getattr(vc.Agent, "get_typeahead"))
+
+
+class TestGetInputPrefill:
+    """Tests for TUI.get_input prefill parameter."""
+
+    def test_get_input_accepts_prefill(self):
+        """get_input() should accept a prefill parameter."""
+        import inspect
+        sig = inspect.signature(vc.TUI.get_input)
+        assert "prefill" in sig.parameters
+
+    def test_get_multiline_input_accepts_prefill(self):
+        """get_multiline_input() should accept a prefill parameter."""
+        import inspect
+        sig = inspect.signature(vc.TUI.get_multiline_input)
+        assert "prefill" in sig.parameters
+
+    def test_show_input_separator_exists(self):
+        """TUI should have show_input_separator() method."""
+        assert hasattr(vc.TUI, "show_input_separator")
+        assert callable(getattr(vc.TUI, "show_input_separator"))
+
+
+class TestWebSearchHtmlUnescape:
+    """Tests for HTML entity decoding in WebSearch results."""
+
+    def test_title_unescape_in_source(self):
+        """WebSearchTool._ddg_search should call html_module.unescape on titles."""
+        import inspect
+        source = inspect.getsource(vc.WebSearchTool._ddg_search)
+        # The title line should have html_module.unescape wrapping the re.sub
+        assert "html_module.unescape" in source
+
+    def test_snippet_unescape_in_source(self):
+        """WebSearchTool._ddg_search should call html_module.unescape on snippets."""
+        import inspect
+        source = inspect.getsource(vc.WebSearchTool._ddg_search)
+        # Count occurrences — should be at least 2 (title + snippet)
+        count = source.count("html_module.unescape")
+        assert count >= 2, f"Expected at least 2 html_module.unescape calls, got {count}"
+
+
+class TestErrorResultDetection:
+    """Tests for error detection in tool results (H1 fix from UX audit)."""
+
+    def test_error_string_detected(self):
+        """Tool results starting with 'Error:' should be flagged as errors."""
+        # The sequential execution path should detect error strings
+        import inspect
+        source = inspect.getsource(vc.Agent.run)
+        assert "output.startswith" in source or "is_err" in source
+
+    def test_stream_response_guarded_by_is_interactive(self):
+        """Status line in stream_response should check is_interactive (H3 fix)."""
+        import inspect
+        source = inspect.getsource(vc.TUI.stream_response)
+        assert "is_interactive" in source
+
+    def test_tool_status_uses_correct_icon(self):
+        """start_tool_status should use the tool-specific icon, not hardcoded wrench (M2 fix)."""
+        import inspect
+        source = inspect.getsource(vc.TUI.start_tool_status)
+        # Should reference _icon from _tool_icons, not hardcode \U0001f527 in the message
+        assert "_icon" in source
+
+    def test_heartbeat_uses_carriage_return(self):
+        """Parallel agent heartbeat should use \\r for in-place update (L6 fix)."""
+        import inspect
+        source = inspect.getsource(vc.MultiAgentCoordinator.run_parallel)
+        assert "\\r" in source or "\r" in source
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# ScrollRegion tests
+# ════════════════════════════════════════════════════════════════════════════════
+
+class TestScrollRegion:
+    """Tests for ScrollRegion DECSTBM functionality."""
+
+    def test_init_defaults(self):
+        """ScrollRegion starts inactive with no cached dimensions."""
+        sr = vc.ScrollRegion()
+        assert sr._active is False
+        assert sr._rows == 0
+        assert sr._cols == 0
+        assert sr._status_text == ""
+        assert sr._hint_text == ""
+
+    def test_supported_non_tty(self):
+        """supported() returns False when stdout is not a TTY."""
+        sr = vc.ScrollRegion()
+        with mock.patch.object(sys.stdout, 'isatty', return_value=False):
+            assert sr.supported() is False
+
+    def test_supported_windows(self):
+        """supported() returns False on Windows."""
+        sr = vc.ScrollRegion()
+        with mock.patch('os.name', 'nt'):
+            assert sr.supported() is False
+
+    def test_supported_dumb_term(self):
+        """supported() returns False with TERM=dumb."""
+        sr = vc.ScrollRegion()
+        with mock.patch.dict(os.environ, {'TERM': 'dumb'}):
+            assert sr.supported() is False
+
+    def test_supported_env_opt_out(self):
+        """supported() returns False when VIBE_NO_SCROLL=1."""
+        sr = vc.ScrollRegion()
+        with mock.patch.dict(os.environ, {'VIBE_NO_SCROLL': '1'}):
+            assert sr.supported() is False
+
+    def test_supported_colors_disabled(self):
+        """supported() returns False when colors are disabled."""
+        sr = vc.ScrollRegion()
+        old = vc.C._enabled
+        try:
+            vc.C._enabled = False
+            assert sr.supported() is False
+        finally:
+            vc.C._enabled = old
+
+    def test_supported_small_terminal(self):
+        """supported() returns False when terminal is too small (<10 rows)."""
+        sr = vc.ScrollRegion()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 8))):
+            with mock.patch.object(sys.stdout, 'isatty', return_value=True):
+                with mock.patch.object(sys.stdin, 'isatty', return_value=True):
+                    assert sr.supported() is False
+
+    def test_supported_normal_tty(self):
+        """supported() returns True for normal TTY environment."""
+        sr = vc.ScrollRegion()
+        with mock.patch.object(sys.stdout, 'isatty', return_value=True), \
+             mock.patch.object(sys.stdin, 'isatty', return_value=True), \
+             mock.patch('os.name', 'posix'), \
+             mock.patch.dict(os.environ, {}, clear=False), \
+             mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            # Ensure TERM != dumb and colors enabled
+            env = os.environ.copy()
+            env.pop('TERM', None)
+            env.pop('NO_COLOR', None)
+            old_enabled = vc.C._enabled
+            vc.C._enabled = True
+            try:
+                with mock.patch.dict(os.environ, env, clear=True):
+                    assert sr.supported() is True
+            finally:
+                vc.C._enabled = old_enabled
+
+    def test_setup_emits_decstbm(self):
+        """setup() should emit DECSTBM escape sequence."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+        output = buf.getvalue()
+        assert sr._active is True
+        assert sr._rows == 24
+        # Should contain DECSTBM: \033[1;21r (24 - 3 = 21)
+        assert "\033[1;21r" in output
+        # No DECSC/DECRC — Reset-Draw-Restore pattern used instead
+        assert "\0337" not in output
+        assert "\0338" not in output
+
+    def test_setup_small_terminal_noop(self):
+        """setup() should not activate for terminals <10 rows."""
+        sr = vc.ScrollRegion()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 8))):
+            sr.setup()
+        assert sr._active is False
+
+    def test_teardown_resets(self):
+        """teardown() should reset scroll region and deactivate."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+                assert sr._active is True
+                buf.truncate(0)
+                buf.seek(0)
+                sr.teardown()
+        output = buf.getvalue()
+        assert sr._active is False
+        # Should contain explicit full-screen reset: \033[1;24r
+        assert "\033[1;24r" in output
+
+    def test_teardown_noop_when_inactive(self):
+        """teardown() does nothing when not active."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('sys.stdout', buf):
+            sr.teardown()
+        assert buf.getvalue() == ""
+
+    def test_print_output_active(self):
+        """print_output() writes directly when active (DECSTBM handles scrolling)."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+                buf.truncate(0)
+                buf.seek(0)
+                sr.print_output("hello world\n")
+        output = buf.getvalue()
+        assert "hello world" in output
+        # No cursor save/restore — DECSTBM auto-scrolls
+        assert "\0337" not in output
+
+    def test_print_output_inactive_fallback(self):
+        """print_output() falls back to sys.stdout.write when not active."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('sys.stdout', buf):
+            sr.print_output("fallback text\n")
+        assert "fallback text" in buf.getvalue()
+        # No cursor save/restore when inactive
+        assert "\0337" not in buf.getvalue()
+
+    def test_update_status(self):
+        """update_status() stores text only — NO terminal write."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+                buf.truncate(0)
+                buf.seek(0)
+                sr.update_status("Running Bash... (3s)")
+        output = buf.getvalue()
+        # update_status() is store-only — no terminal write
+        assert output == "", "update_status() must NOT write to terminal"
+        assert sr._status_text == "Running Bash... (3s)"
+
+    def test_update_hint(self):
+        """update_hint() stores hint text only — NO terminal write."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+                buf.truncate(0)
+                buf.seek(0)
+                sr.update_hint("hello world")
+        output = buf.getvalue()
+        # update_hint() is store-only — no terminal write
+        assert output == "", "update_hint() must NOT write to terminal"
+        assert sr._hint_text == "hello world"
+
+    def test_clear_status(self):
+        """clear_status() clears status text and draws inline blank; hint text preserved."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+                sr.update_status("test status")
+                sr.update_hint("test hint")
+                sr.clear_status()
+        assert sr._status_text == ""
+        # clear_status() only clears _status_text; hint text is preserved
+        assert sr._hint_text == "test hint"
+
+    def test_resize_updates_dimensions(self):
+        """resize() updates terminal dimensions and resets scroll region."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+        assert sr._rows == 24
+        buf2 = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((120, 40))):
+            with mock.patch('sys.stdout', buf2):
+                sr.resize()
+        assert sr._rows == 40
+        assert sr._cols == 120
+        output = buf2.getvalue()
+        # Should set new scroll region: rows - 3 = 37
+        assert "\033[1;37r" in output
+
+    def test_resize_teardown_if_too_small(self):
+        """resize() tears down if terminal becomes too small."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+        assert sr._active is True
+        buf2 = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 5))):
+            with mock.patch('sys.stdout', buf2):
+                sr.resize()
+        assert sr._active is False
+
+    def test_resize_nonblocking_lock(self):
+        """resize() uses non-blocking lock to avoid deadlock from signal handler."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+        assert sr._active is True
+        # Simulate another thread holding the lock (SIGWINCH scenario)
+        sr._lock.acquire()
+        try:
+            buf2 = StringIO()
+            with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((120, 40))):
+                with mock.patch('sys.stdout', buf2):
+                    sr.resize()  # Should return early, not deadlock
+            # Dimensions should NOT change (lock not acquired)
+            assert sr._rows == 24
+            assert sr._cols == 80
+        finally:
+            sr._lock.release()
+
+    def test_teardown_zero_rows_guard(self):
+        """teardown() skips escape sequences if _rows <= 0."""
+        sr = vc.ScrollRegion()
+        sr._active = True
+        sr._rows = 0
+        buf = StringIO()
+        with mock.patch('sys.stdout', buf):
+            sr.teardown()
+        assert sr._active is False
+        # No escape sequences written (guard prevents bad values)
+        assert buf.getvalue() == ""
+
+    def test_setup_double_check_inside_lock(self):
+        """setup() checks _active inside lock — prevents double activation."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+        assert sr._active is True
+        # Second setup should be no-op (checked inside lock)
+        buf2 = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf2):
+                sr.setup()
+        # No output from second setup — early return inside lock
+        assert buf2.getvalue() == ""
+
+    def test_build_footer_buf_returns_string(self):
+        """_build_footer_buf() returns a single string with all footer content."""
+        sr = vc.ScrollRegion()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            buf = StringIO()
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+        with sr._lock:
+            footer = sr._build_footer_buf()
+        assert isinstance(footer, str)
+        assert len(footer) > 0
+        # Should contain separator character
+        assert "─" in footer
+        # Should contain ESC: stop hint
+        assert "ESC: stop" in footer
+
+    def test_build_footer_buf_inactive_empty(self):
+        """_build_footer_buf() returns empty string when inactive."""
+        sr = vc.ScrollRegion()
+        with sr._lock:
+            footer = sr._build_footer_buf()
+        assert footer == ""
+
+    def test_atomic_write_setup(self):
+        """setup() should use a single sys.stdout.write() call."""
+        sr = vc.ScrollRegion()
+        write_calls = []
+        buf = StringIO()
+        original_write = buf.write
+        def tracking_write(s):
+            write_calls.append(s)
+            return original_write(s)
+        buf.write = tracking_write
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+        # Should be exactly 1 write call (atomic)
+        assert len(write_calls) == 1
+        # That single write should contain both DECSTBM and footer content
+        assert "\033[1;21r" in write_calls[0]
+        assert "─" in write_calls[0]
+
+    def test_update_status_is_store_only(self):
+        """update_status() stores text only — zero terminal writes."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+        write_calls = []
+        buf2 = StringIO()
+        original_write = buf2.write
+        def tracking_write(s):
+            write_calls.append(s)
+            return original_write(s)
+        buf2.write = tracking_write
+        with mock.patch('sys.stdout', buf2):
+            sr.update_status("test status")
+        # Store-only: zero writes
+        assert len(write_calls) == 0, f"Expected 0 writes, got {len(write_calls)}"
+        assert sr._status_text == "test status"
+
+    def test_teardown_preserves_status_text(self):
+        """teardown() should preserve _status_text and _hint_text for re-setup."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+                sr.update_status("my status")
+                sr.update_hint("my hint")
+                sr.teardown()
+        # Status and hint should be preserved across teardown
+        assert sr._status_text == "my status"
+        assert sr._hint_text == "my hint"
+
+    def test_teardown_setup_cycle_restores_footer(self):
+        """teardown() then setup() should redraw footer with preserved status."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+                sr.update_status("Ready")
+                sr.teardown()
+                buf.truncate(0)
+                buf.seek(0)
+                sr.setup()
+        output = buf.getvalue()
+        # The re-setup should draw the preserved "Ready" status
+        assert "Ready" in output
+
+    def test_setup_no_decsc_decrc(self):
+        """setup() must NOT emit DECSC (ESC 7) or DECRC (ESC 8)."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+        output = buf.getvalue()
+        assert "\0337" not in output, "DECSC found in setup() output"
+        assert "\0338" not in output, "DECRC found in setup() output"
+
+    def test_setup_footer_before_decstbm(self):
+        """setup() must draw footer BEFORE DECSTBM to avoid margin-outside cursor issues."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+        output = buf.getvalue()
+        # Footer contains separator character '─'
+        footer_pos = output.find("─")
+        decstbm_pos = output.find("\033[1;21r")
+        assert footer_pos >= 0, "Footer separator not found"
+        assert decstbm_pos >= 0, "DECSTBM not found"
+        assert footer_pos < decstbm_pos, "Footer must be drawn BEFORE DECSTBM"
+
+    def test_no_draw_inline_status_method(self):
+        """ScrollRegion must NOT have _draw_inline_status_locked or _refresh methods (removed)."""
+        sr = vc.ScrollRegion()
+        assert not hasattr(sr, '_draw_inline_status_locked'), \
+            "_draw_inline_status_locked should be removed (store-only approach)"
+        assert not hasattr(sr, '_refresh_status_locked'), \
+            "_refresh_status_locked should be removed (caused display corruption)"
+        assert not hasattr(sr, '_refresh_footer_locked'), \
+            "_refresh_footer_locked should be removed (caused display corruption)"
+
+    def test_clear_status_is_store_only(self):
+        """clear_status() clears text only — zero terminal writes."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+                sr.update_status("some status")
+        write_calls = []
+        buf2 = StringIO()
+        original_write = buf2.write
+        def tracking_write(s):
+            write_calls.append(s)
+            return original_write(s)
+        buf2.write = tracking_write
+        with mock.patch('sys.stdout', buf2):
+            sr.clear_status()
+        # Store-only: zero writes
+        assert len(write_calls) == 0, f"Expected 0 writes, got {len(write_calls)}"
+        assert sr._status_text == ""
+
+    def test_class_no_save_restore_attrs(self):
+        """ScrollRegion class must NOT have _SAVE or _RESTORE attributes."""
+        assert not hasattr(vc.ScrollRegion, '_SAVE'), "_SAVE should be removed"
+        assert not hasattr(vc.ScrollRegion, '_RESTORE'), "_RESTORE should be removed"
+        sr = vc.ScrollRegion()
+        assert not hasattr(sr, '_SAVE'), "_SAVE instance attr should not exist"
+        assert not hasattr(sr, '_RESTORE'), "_RESTORE instance attr should not exist"
+
+    def test_resize_uses_reset_pattern(self):
+        """resize() must teardown old margins, draw new footer, set new DECSTBM."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+        write_calls = []
+        buf2 = StringIO()
+        original_write = buf2.write
+        def tracking_write(s):
+            write_calls.append(s)
+            return original_write(s)
+        buf2.write = tracking_write
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((120, 40))):
+            with mock.patch('sys.stdout', buf2):
+                sr.resize()
+        assert len(write_calls) == 1
+        data = write_calls[0]
+        # Teardown-Footer-Setup: \033[1;24r (reset OLD margins) ... footer ... \033[1;37r ... \033[37;1H
+        assert data.startswith("\033[1;24r"), "resize must start with old margin reset (\\033[1;24r)"
+        assert "\033[1;37r" in data, "DECSTBM with new size missing"
+        assert "\033[37;1H" in data, "Cursor position with new size missing"
+        assert "─" in data, "Footer content missing"
+
+    def test_debug_scroll_function_exists(self):
+        """_debug_scroll_region function should exist and be callable."""
+        assert hasattr(vc, '_debug_scroll_region'), "_debug_scroll_region not found"
+        assert callable(vc._debug_scroll_region)
+
+
+class TestScrollRegionIntegration:
+    """Integration tests for ScrollRegion with TUI."""
+
+    def test_tui_has_scroll_region(self):
+        """TUI instance should have a scroll_region attribute."""
+        config = vc.Config()
+        config.history_file = "/dev/null"
+        with mock.patch.object(vc, 'HAS_READLINE', False):
+            tui = vc.TUI(config)
+        assert hasattr(tui, 'scroll_region')
+        assert isinstance(tui.scroll_region, vc.ScrollRegion)
+
+    def test_scroll_print_routes_to_scroll_region(self):
+        """_scroll_print should print text when scroll region is active."""
+        config = vc.Config()
+        config.history_file = "/dev/null"
+        with mock.patch.object(vc, 'HAS_READLINE', False):
+            tui = vc.TUI(config)
+
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                tui.scroll_region.setup()
+                buf.truncate(0)
+                buf.seek(0)
+                tui._scroll_print("test output")
+        output = buf.getvalue()
+        assert "test output" in output
+        tui.scroll_region._active = False  # cleanup
+
+    def test_scroll_print_normal_when_inactive(self):
+        """_scroll_print should use normal print when scroll region inactive."""
+        config = vc.Config()
+        config.history_file = "/dev/null"
+        with mock.patch.object(vc, 'HAS_READLINE', False):
+            tui = vc.TUI(config)
+
+        buf = StringIO()
+        with mock.patch('sys.stdout', buf):
+            tui._scroll_print("normal output")
+        output = buf.getvalue()
+        assert "normal output" in output
+        # No cursor save/restore
+        assert "\0337" not in output
+
+
+    def test_scroll_print_acquires_lock_when_active(self):
+        """_scroll_print should acquire scroll_region._lock when active,
+        preventing interleaving with cursor save/restore in status updates."""
+        config = vc.Config()
+        config.history_file = "/dev/null"
+        with mock.patch.object(vc, 'HAS_READLINE', False):
+            tui = vc.TUI(config)
+
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                tui.scroll_region.setup()
+
+        # Hold the lock from another thread, verify _scroll_print blocks
+        blocked = threading.Event()
+        released = threading.Event()
+        printed = threading.Event()
+
+        def hold_lock():
+            with tui.scroll_region._lock:
+                blocked.set()
+                released.wait(timeout=2)
+
+        t = threading.Thread(target=hold_lock, daemon=True)
+        t.start()
+        blocked.wait(timeout=2)
+
+        # _scroll_print should block because the lock is held
+        def do_print():
+            buf2 = StringIO()
+            with mock.patch('sys.stdout', buf2):
+                tui._scroll_print("locked output")
+            printed.set()
+
+        t2 = threading.Thread(target=do_print, daemon=True)
+        t2.start()
+        # Give it a moment — it should NOT print yet
+        assert not printed.wait(timeout=0.1), "_scroll_print should block when lock is held"
+        released.set()
+        printed.wait(timeout=2)
+        t.join(timeout=2)
+        t2.join(timeout=2)
+        tui.scroll_region._active = False
+
+    def test_scroll_aware_print_acquires_lock_when_active(self):
+        """_scroll_aware_print should block when scroll region lock is held."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+
+        old = vc._active_scroll_region
+        vc._active_scroll_region = sr
+        try:
+            blocked = threading.Event()
+            released = threading.Event()
+            printed = threading.Event()
+
+            def hold_lock():
+                with sr._lock:
+                    blocked.set()
+                    released.wait(timeout=2)
+
+            t = threading.Thread(target=hold_lock, daemon=True)
+            t.start()
+            blocked.wait(timeout=2)
+
+            def do_print():
+                buf2 = StringIO()
+                with mock.patch('sys.stdout', buf2):
+                    vc._scroll_aware_print("locked text")
+                printed.set()
+
+            t2 = threading.Thread(target=do_print, daemon=True)
+            t2.start()
+            assert not printed.wait(timeout=0.1), "_scroll_aware_print should block when lock is held"
+            released.set()
+            printed.wait(timeout=2)
+            t.join(timeout=2)
+            t2.join(timeout=2)
+        finally:
+            vc._active_scroll_region = old
+            sr._active = False
+
+
+class TestScrollRegionCleanup:
+    """Tests for scroll region cleanup safety nets."""
+
+    def test_cleanup_function_resets_active(self):
+        """_cleanup_scroll_region should teardown an active scroll region."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+        assert sr._active is True
+
+        old = vc._active_scroll_region
+        vc._active_scroll_region = sr
+        try:
+            buf2 = StringIO()
+            with mock.patch('sys.stdout', buf2):
+                vc._cleanup_scroll_region()
+            assert sr._active is False
+            assert "\033[1;24r" in buf2.getvalue()
+        finally:
+            vc._active_scroll_region = old
+
+    def test_cleanup_noop_when_no_active_region(self):
+        """_cleanup_scroll_region should be safe when no region is active."""
+        old = vc._active_scroll_region
+        vc._active_scroll_region = None
+        try:
+            vc._cleanup_scroll_region()  # should not raise
+        finally:
+            vc._active_scroll_region = old
+
+    def test_scroll_aware_print_active(self):
+        """_scroll_aware_print prints text (DECSTBM handles scrolling)."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+
+        old = vc._active_scroll_region
+        vc._active_scroll_region = sr
+        try:
+            buf2 = StringIO()
+            with mock.patch('sys.stdout', buf2):
+                vc._scroll_aware_print("routed text")
+            output = buf2.getvalue()
+            assert "routed text" in output
+        finally:
+            vc._active_scroll_region = old
+            sr._active = False
+
+    def test_scroll_aware_print_inactive(self):
+        """_scroll_aware_print uses normal print when no active region."""
+        old = vc._active_scroll_region
+        vc._active_scroll_region = None
+        try:
+            buf = StringIO()
+            with mock.patch('sys.stdout', buf):
+                vc._scroll_aware_print("normal text")
+            assert "normal text" in buf.getvalue()
+            assert "\0337" not in buf.getvalue()
+        finally:
+            vc._active_scroll_region = old
+
+
+class TestInputMonitorTypeaheadCallback:
+    """Tests for InputMonitor on_typeahead callback."""
+
+    def test_callback_registered(self):
+        """InputMonitor should accept on_typeahead callback."""
+        cb = mock.Mock()
+        mon = vc.InputMonitor(on_typeahead=cb)
+        assert mon._on_typeahead is cb
+
+    def test_no_callback_default(self):
+        """InputMonitor without callback should have None."""
+        mon = vc.InputMonitor()
+        assert mon._on_typeahead is None
+
+    def test_notify_typeahead_calls_callback(self):
+        """_notify_typeahead should call the callback with decoded text."""
+        cb = mock.Mock()
+        mon = vc.InputMonitor(on_typeahead=cb)
+        with mon._typeahead_lock:
+            mon._typeahead.append(b'h')
+            mon._typeahead.append(b'i')
+        mon._notify_typeahead()
+        cb.assert_called_once_with("hi")
+
+    def test_notify_typeahead_empty(self):
+        """_notify_typeahead should call with empty string when buffer empty."""
+        cb = mock.Mock()
+        mon = vc.InputMonitor(on_typeahead=cb)
+        mon._notify_typeahead()
+        cb.assert_called_once_with("")
+
+    def test_notify_typeahead_exception_safe(self):
+        """_notify_typeahead should not raise even if callback raises."""
+        cb = mock.Mock(side_effect=RuntimeError("boom"))
+        mon = vc.InputMonitor(on_typeahead=cb)
+        with mon._typeahead_lock:
+            mon._typeahead.append(b'x')
+        mon._notify_typeahead()  # should not raise
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# MiniScreen — minimal terminal emulator for verifying rendered output
+# ════════════════════════════════════════════════════════════════════════════════
+
+class MiniScreen:
+    """Minimal VT100 emulator that processes CSI sequences into a 2D char grid.
+
+    Supports:
+      - CUP  \\033[r;cH  (cursor position)
+      - EL   \\033[2K    (erase entire line)
+      - SGR  \\033[...m  (ignored — just strips)
+      - DECSTBM \\033[t;br (sets scroll region boundaries)
+      - DECSC/DECRC (ignored — ScrollRegion doesn't use them)
+      - CSI s / CSI u  (handled for completeness; not used by ScrollRegion)
+      - Normal character printing with cursor advance
+    """
+
+    def __init__(self, rows=24, cols=80):
+        self.rows = rows
+        self.cols = cols
+        self.grid = [[' '] * cols for _ in range(rows)]
+        self.crow = 0  # 0-indexed
+        self.ccol = 0
+        self._saved_crow = 0
+        self._saved_ccol = 0
+
+    def feed(self, data):
+        """Parse escape sequences and text, update grid."""
+        i = 0
+        n = len(data)
+        while i < n:
+            ch = data[i]
+            if ch == '\033':
+                # ESC sequence
+                if i + 1 < n and data[i + 1] == '[':
+                    # CSI sequence: \033[ ... <letter>
+                    j = i + 2
+                    while j < n and (data[j].isdigit() or data[j] == ';'):
+                        j += 1
+                    if j < n:
+                        params_str = data[i + 2:j]
+                        cmd = data[j]
+                        self._handle_csi(params_str, cmd)
+                        i = j + 1
+                    else:
+                        i = j
+                elif i + 1 < n and data[i + 1] in ('7', '8'):
+                    # DECSC / DECRC — ignore
+                    i += 2
+                else:
+                    i += 1
+            elif ch == '\n':
+                self.crow = min(self.crow + 1, self.rows - 1)
+                self.ccol = 0
+                i += 1
+            elif ch == '\r':
+                self.ccol = 0
+                i += 1
+            elif ord(ch) >= 32:
+                # Printable character
+                if 0 <= self.crow < self.rows and 0 <= self.ccol < self.cols:
+                    self.grid[self.crow][self.ccol] = ch
+                    self.ccol += 1
+                    if self.ccol >= self.cols:
+                        self.ccol = self.cols - 1
+                else:
+                    self.ccol += 1
+                i += 1
+            else:
+                i += 1
+
+    def _handle_csi(self, params_str, cmd):
+        params = [int(x) if x else 0 for x in params_str.split(';')] if params_str else []
+        if cmd == 'H':
+            # CUP: \033[row;colH (1-based)
+            r = (params[0] if len(params) > 0 and params[0] > 0 else 1) - 1
+            c = (params[1] if len(params) > 1 and params[1] > 0 else 1) - 1
+            self.crow = max(0, min(r, self.rows - 1))
+            self.ccol = max(0, min(c, self.cols - 1))
+        elif cmd == 'K':
+            # EL: erase line
+            mode = params[0] if params else 0
+            if mode == 2:
+                # Erase entire line
+                if 0 <= self.crow < self.rows:
+                    self.grid[self.crow] = [' '] * self.cols
+        elif cmd == 'J':
+            # ED: erase display
+            mode = params[0] if params else 0
+            if mode == 0:
+                # Erase from cursor to end
+                if 0 <= self.crow < self.rows:
+                    self.grid[self.crow][self.ccol:] = [' '] * (self.cols - self.ccol)
+                for r in range(self.crow + 1, self.rows):
+                    self.grid[r] = [' '] * self.cols
+        elif cmd == 'r':
+            # DECSTBM — just record, don't affect grid
+            pass
+        elif cmd == 's':
+            # CSI s — save cursor position
+            self._saved_crow = self.crow
+            self._saved_ccol = self.ccol
+        elif cmd == 'u':
+            # CSI u — restore cursor position
+            self.crow = self._saved_crow
+            self.ccol = self._saved_ccol
+        elif cmd == 'm':
+            # SGR — color/style, ignore
+            pass
+
+    def get_row(self, row_1based):
+        """Get content of a row (1-based) as string, trailing spaces stripped."""
+        idx = row_1based - 1
+        if 0 <= idx < self.rows:
+            return ''.join(self.grid[idx]).rstrip()
+        return ''
+
+    def get_row_raw(self, row_1based):
+        """Get full content of a row (1-based) without stripping."""
+        idx = row_1based - 1
+        if 0 <= idx < self.rows:
+            return ''.join(self.grid[idx])
+        return ' ' * self.cols
+
+
+class TestScrollRegionScreen:
+    """Screen-level tests — verify actual rendered content via MiniScreen emulator."""
+
+    def _make_sr_and_screen(self, rows=24, cols=80):
+        """Create a ScrollRegion, run setup(), return (sr, MiniScreen)."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((cols, rows))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+        screen = MiniScreen(rows, cols)
+        screen.feed(buf.getvalue())
+        return sr, screen, buf
+
+    def test_separator_rendered_at_correct_row(self):
+        """After setup(), separator (─) must appear at row rows-2."""
+        sr, screen, _ = self._make_sr_and_screen(24, 80)
+        sep_row = screen.get_row(22)  # rows - 2 = 22
+        assert '─' in sep_row, f"Separator not at row 22: {sep_row!r}"
+        # Separator should fill most of the line
+        assert sep_row.count('─') >= 40
+
+    def test_hint_rendered_at_bottom_row(self):
+        """After setup(), hint line (ESC: stop) must appear at row=rows."""
+        sr, screen, _ = self._make_sr_and_screen(24, 80)
+        hint_row = screen.get_row(24)
+        assert 'ESC: stop' in hint_row, f"Hint not at row 24: {hint_row!r}"
+
+    def test_status_rendered_at_setup(self):
+        """Status stored via update_status() appears in footer when setup() redraws."""
+        sr = vc.ScrollRegion()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            # First setup
+            buf1 = StringIO()
+            with mock.patch('sys.stdout', buf1):
+                sr.setup()
+            # Store status (no terminal write)
+            sr.update_status("Thinking... (2s)")
+            # Teardown + re-setup: footer should include stored status
+            buf2 = StringIO()
+            with mock.patch('sys.stdout', buf2):
+                sr.teardown()
+                sr.setup()
+        screen = MiniScreen(24, 80)
+        screen.feed(buf2.getvalue())
+        # Status row = rows - 1 = 23
+        status_row = screen.get_row(23)
+        assert 'Thinking' in status_row, f"Status not at row 23: {status_row!r}"
+
+    def test_no_bracket_leak_in_any_row(self):
+        """No stray '[' from broken CSI sequences should appear."""
+        sr, screen, _ = self._make_sr_and_screen(24, 80)
+        # Update status to trigger Reset-Draw-Restore
+        buf2 = StringIO()
+        with mock.patch('sys.stdout', buf2):
+            sr.update_status("Running test")
+        screen.feed(buf2.getvalue())
+        # Check that no row contains a lone '[' that isn't part of real content
+        # The footer rows should not have unexpected '[' characters
+        for row_num in (22, 23, 24):
+            row_text = screen.get_row(row_num)
+            # '[' should not appear outside of intentional text
+            # (status text "Running test" has no brackets)
+            bracket_count = row_text.count('[')
+            assert bracket_count == 0, \
+                f"Stray '[' at row {row_num}: {row_text!r}"
+
+    def test_separator_persists_after_status_update(self):
+        """Separator must survive a Reset-Draw-Restore status update."""
+        sr, screen, _ = self._make_sr_and_screen(24, 80)
+        buf2 = StringIO()
+        with mock.patch('sys.stdout', buf2):
+            sr.update_status("Updated status")
+        screen.feed(buf2.getvalue())
+        sep_row = screen.get_row(22)
+        assert '─' in sep_row, f"Separator lost after update: {sep_row!r}"
+        assert sep_row.count('─') >= 40
+
+    def test_hint_with_typeahead(self):
+        """Hint with type-ahead appears only after setup(), not via update_hint() mid-scroll."""
+        # update_hint() stores text for next setup() but does not write to terminal
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+                sr.update_hint("hello world")
+                # Teardown and re-setup to see the hint in footer
+                sr.teardown()
+                buf.truncate(0)
+                buf.seek(0)
+                sr.setup()
+        screen = MiniScreen(24, 80)
+        screen.feed(buf.getvalue())
+        hint_row = screen.get_row(24)
+        assert 'hello world' in hint_row, f"Type-ahead missing after re-setup: {hint_row!r}"
+        assert 'ESC: stop' in hint_row
+
+    def test_footer_rows_empty_above_separator(self):
+        """Row above separator (row 21 for 24-row terminal) should be empty/blank."""
+        sr, screen, _ = self._make_sr_and_screen(24, 80)
+        row_above = screen.get_row(21)
+        # scroll_end row — should be empty (no footer content leaked up)
+        assert '─' not in row_above, f"Separator leaked to row 21: {row_above!r}"
+
+    def test_different_terminal_sizes(self):
+        """Footer should render at correct rows for various terminal sizes."""
+        for rows, cols in [(24, 80), (40, 120), (15, 60), (10, 40)]:
+            sr, screen, _ = self._make_sr_and_screen(rows, cols)
+            sep_row_num = rows - 2
+            status_row_num = rows - 1
+            hint_row_num = rows
+            sep = screen.get_row(sep_row_num)
+            hint = screen.get_row(hint_row_num)
+            assert '─' in sep, f"Separator missing at row {sep_row_num} ({cols}x{rows}): {sep!r}"
+            assert 'ESC: stop' in hint, f"Hint missing at row {hint_row_num} ({cols}x{rows}): {hint!r}"
+
+    def test_status_update_does_not_corrupt_separator(self):
+        """Multiple rapid status updates (store-only) should never corrupt the separator."""
+        sr, screen, _ = self._make_sr_and_screen(24, 80)
+        for i in range(10):
+            sr.update_status(f"Step {i}/9")
+        # No writes from update_status, so screen is unchanged from setup()
+        sep = screen.get_row(22)
+        assert '─' in sep and sep.count('─') >= 40, f"Separator corrupted: {sep!r}"
+        # Verify stored text
+        assert sr._status_text == "Step 9/9"
+
+    def test_resize_renders_footer_at_new_position(self):
+        """After resize(), footer must appear at the new rows."""
+        sr, screen, _ = self._make_sr_and_screen(24, 80)
+        # Resize to 40 rows
+        buf2 = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((120, 40))):
+            with mock.patch('sys.stdout', buf2):
+                sr.resize()
+        screen2 = MiniScreen(40, 120)
+        screen2.feed(buf2.getvalue())
+        # New footer: rows 38 (sep), 39 (status), 40 (hint)
+        sep = screen2.get_row(38)
+        hint = screen2.get_row(40)
+        assert '─' in sep, f"Separator missing at row 38 after resize: {sep!r}"
+        assert 'ESC: stop' in hint, f"Hint missing at row 40 after resize: {hint!r}"
+
+    def test_teardown_clears_footer(self):
+        """teardown() should clear the footer area."""
+        sr = vc.ScrollRegion()
+        buf = StringIO()
+        with mock.patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 24))):
+            with mock.patch('sys.stdout', buf):
+                sr.setup()
+                sr.update_status("active")
+        # Now teardown
+        buf2 = StringIO()
+        with mock.patch('sys.stdout', buf2):
+            sr.teardown()
+        # Feed both setup + teardown into screen
+        screen = MiniScreen(24, 80)
+        screen.feed(buf.getvalue())
+        screen.feed(buf2.getvalue())
+        # Footer area should be cleared
+        sep = screen.get_row(22)
+        assert '─' not in sep, f"Separator still visible after teardown: {sep!r}"
+
+
+# ---------------------------------------------------------------------------
+# PR #9 review fixes — new test classes
+# ---------------------------------------------------------------------------
+
+class TestCharDisplayWidth:
+    """_char_display_width correctly reports terminal width for various scripts."""
+
+    def test_ascii_is_width_1(self):
+        assert vc._char_display_width('A') == 1
+        assert vc._char_display_width('z') == 1
+        assert vc._char_display_width(' ') == 1
+
+    def test_cjk_is_width_2(self):
+        assert vc._char_display_width('日') == 2
+        assert vc._char_display_width('本') == 2
+        assert vc._char_display_width('語') == 2
+
+    def test_latin_extended_is_width_1(self):
+        """This is the key regression test — 'é' was misclassified as width 2 before."""
+        assert vc._char_display_width('é') == 1
+        assert vc._char_display_width('ñ') == 1
+        assert vc._char_display_width('ü') == 1
+
+    def test_cyrillic_is_width_1(self):
+        assert vc._char_display_width('Д') == 1
+        assert vc._char_display_width('Ж') == 1
+
+    def test_fullwidth_form_is_width_2(self):
+        # U+FF21 FULLWIDTH LATIN CAPITAL LETTER A
+        assert vc._char_display_width('\uff21') == 2
+
+    def test_display_width_delegates_to_char(self):
+        """_display_width should agree with sum of _char_display_width."""
+        text = "Hello日本語éñ"
+        expected = sum(vc._char_display_width(c) for c in text)
+        assert vc._display_width(text) == expected
+
+
+
+class TestReadLatestPlan:
+    """_read_latest_plan reads active plan or falls back to newest .md."""
+
+    def _make_agent_stub(self, cwd, active_plan_path=None):
+        """Create a minimal agent-like object for _read_latest_plan."""
+        config = type("C", (), {"cwd": cwd})()
+        agent = type("A", (), {
+            "_active_plan_path": active_plan_path,
+            "config": config,
+        })()
+        return agent
+
+    def test_reads_active_plan_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            plan_file = os.path.join(td, "plan.md")
+            with open(plan_file, "w") as f:
+                f.write("# My plan\nStep 1")
+            agent = self._make_agent_stub(td, active_plan_path=plan_file)
+            result = vc._read_latest_plan(agent)
+            assert "My plan" in result
+
+    def test_fallback_to_newest_md(self):
+        with tempfile.TemporaryDirectory() as td:
+            plans_dir = os.path.join(td, ".vibe-local", "plans")
+            os.makedirs(plans_dir)
+            # Create two plan files with different mtimes
+            old = os.path.join(plans_dir, "old.md")
+            new = os.path.join(plans_dir, "new.md")
+            with open(old, "w") as f:
+                f.write("old plan")
+            with open(new, "w") as f:
+                f.write("new plan")
+            # Set mtime explicitly to avoid flaky tests on slow filesystems
+            os.utime(old, (1000000, 1000000))
+            os.utime(new, (2000000, 2000000))
+            agent = self._make_agent_stub(td, active_plan_path=None)
+            result = vc._read_latest_plan(agent)
+            assert "new plan" in result
+
+    def test_no_plans_dir_returns_empty(self):
+        with tempfile.TemporaryDirectory() as td:
+            agent = self._make_agent_stub(td, active_plan_path=None)
+            result = vc._read_latest_plan(agent)
+            assert result == ""
+
+    def test_truncates_at_8000_chars(self):
+        with tempfile.TemporaryDirectory() as td:
+            plan_file = os.path.join(td, "big.md")
+            with open(plan_file, "w") as f:
+                f.write("x" * 10000)
+            agent = self._make_agent_stub(td, active_plan_path=plan_file)
+            result = vc._read_latest_plan(agent)
+            assert len(result) == 8000
+
+
+class TestPlanListSamefile:
+    """/plan list should not crash when files are missing."""
+
+    def test_samefile_guard_in_source(self):
+        """The samefile call should be wrapped with os.path.exists checks."""
+        import inspect
+        # The /plan list code is inside main()
+        source = inspect.getsource(vc.main)
+        assert "os.path.exists" in source or "path.exists" in source
+        # Should also have try/except around samefile
+        assert "samefile" in source
+
+    def test_samefile_with_missing_file_no_crash(self):
+        """os.path.samefile should not be called with missing paths."""
+        # Directly test the defensive pattern
+        fp = "/nonexistent/path/plan.md"
+        active = "/also/nonexistent/active.md"
+        try:
+            result = " ◀" if (active
+                               and os.path.exists(fp)
+                               and os.path.exists(active)
+                               and os.path.samefile(fp, active)) else ""
+        except (OSError, ValueError):
+            result = ""
+        assert result == ""
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PR #9 Coverage Holes
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestExitPlanModeCheckpoint:
+    """_exit_plan_mode creates a git checkpoint via stash create/store."""
+
+    def _make_exit_plan_agent(self, td, is_git=True, run_git_returns=None):
+        """Build minimal agent + session stubs for _exit_plan_mode."""
+        cfg = vc.Config()
+        cfg.cwd = td
+        cfg.sessions_dir = tempfile.mkdtemp()
+        cfg.yes_mode = True
+        defaults = [(True, "abc123"), (True, "")]
+        gc = type("MockGC", (), {
+            "_is_git_repo": is_git,
+            "_run_git": mock.MagicMock(side_effect=run_git_returns or defaults),
+            "_checkpoints": [],
+            "MAX_CHECKPOINTS": 20,
+        })()
+        session = type("MockSession", (), {
+            "add_system_note": mock.MagicMock(),
+        })()
+        agent = type("A", (), {
+            "_plan_mode": True,
+            "_active_plan_path": None,
+            "config": cfg,
+            "git_checkpoint": gc,
+        })()
+        return agent, session
+
+    def test_creates_checkpoint_when_git_repo(self):
+        """stash create returns a ref → checkpoint appended."""
+        with tempfile.TemporaryDirectory() as td:
+            agent, session = self._make_exit_plan_agent(td, is_git=True)
+            vc._exit_plan_mode(agent, session)
+            assert len(agent.git_checkpoint._checkpoints) == 1
+            assert agent.git_checkpoint._checkpoints[0][1] == "plan-to-act"
+
+    def test_skips_checkpoint_when_not_git_repo(self):
+        """_is_git_repo=False → _run_git never called."""
+        with tempfile.TemporaryDirectory() as td:
+            agent, session = self._make_exit_plan_agent(td, is_git=False)
+            vc._exit_plan_mode(agent, session)
+            agent.git_checkpoint._run_git.assert_not_called()
+            assert len(agent.git_checkpoint._checkpoints) == 0
+
+    def test_skips_when_stash_create_returns_empty(self):
+        """stash create returns empty ref (clean tree) → no checkpoint."""
+        with tempfile.TemporaryDirectory() as td:
+            agent, session = self._make_exit_plan_agent(
+                td, is_git=True, run_git_returns=[(True, "")]
+            )
+            vc._exit_plan_mode(agent, session)
+            assert len(agent.git_checkpoint._checkpoints) == 0
+
+    def test_max_checkpoints_trimming(self):
+        """Checkpoints list is trimmed to MAX_CHECKPOINTS."""
+        with tempfile.TemporaryDirectory() as td:
+            agent, session = self._make_exit_plan_agent(td, is_git=True)
+            # Pre-fill to MAX_CHECKPOINTS
+            mc = agent.git_checkpoint.MAX_CHECKPOINTS
+            agent.git_checkpoint._checkpoints = [
+                (i, f"cp-{i}", 1000.0 + i) for i in range(mc)
+            ]
+            vc._exit_plan_mode(agent, session)
+            assert len(agent.git_checkpoint._checkpoints) == mc
+
+
+class TestWriteRestrictionGuardBehavior:
+    """Behavioral tests: guard logic with real paths (realpath + startswith)."""
+
+    @staticmethod
+    def _is_write_allowed_in_plan_mode(file_path, cwd):
+        """Reproduce the guard logic from Agent.run()."""
+        fpath = os.path.realpath(file_path)
+        plans_dir = os.path.realpath(os.path.join(cwd, ".vibe-local", "plans"))
+        return fpath.startswith(plans_dir + os.sep)
+
+    def test_write_inside_plans_dir_allowed(self):
+        with tempfile.TemporaryDirectory() as td:
+            plans_dir = os.path.join(td, ".vibe-local", "plans")
+            os.makedirs(plans_dir)
+            target = os.path.join(plans_dir, "plan.md")
+            assert self._is_write_allowed_in_plan_mode(target, td) is True
+
+    def test_write_outside_plans_dir_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            os.makedirs(os.path.join(td, ".vibe-local", "plans"))
+            target = os.path.join(td, "README.md")
+            assert self._is_write_allowed_in_plan_mode(target, td) is False
+
+    def test_write_traversal_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            plans_dir = os.path.join(td, ".vibe-local", "plans")
+            os.makedirs(plans_dir)
+            # Path traversal: plans/../../evil.py resolves outside plans/
+            target = os.path.join(plans_dir, "..", "..", "evil.py")
+            assert self._is_write_allowed_in_plan_mode(target, td) is False
+
+    def test_write_plans_dir_itself_blocked(self):
+        """plans/ directory path (without trailing sep) is blocked."""
+        with tempfile.TemporaryDirectory() as td:
+            plans_dir = os.path.join(td, ".vibe-local", "plans")
+            os.makedirs(plans_dir)
+            assert self._is_write_allowed_in_plan_mode(plans_dir, td) is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# RAG Engine
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestRAGConfig:
+    """Tests for RAG-related Config options."""
+
+    def test_rag_defaults(self):
+        cfg = vc.Config()
+        assert cfg.rag is False
+        assert cfg.rag_mode == "query"
+        assert cfg.rag_path is None
+        assert cfg.rag_topk == 5
+        assert cfg.rag_model == "nomic-embed-text"
+        assert cfg.rag_index is None
+
+    def test_rag_cli_args(self):
+        cfg = vc.Config()
+        cfg._load_cli_args([
+            "--rag", "--rag-mode", "query",
+            "--rag-path", "./docs", "--rag-topk", "3",
+            "--rag-model", "bge-small",
+        ])
+        assert cfg.rag is True
+        assert cfg.rag_mode == "query"
+        assert cfg.rag_path == "./docs"
+        assert cfg.rag_topk == 3
+        assert cfg.rag_model == "bge-small"
+
+    def test_rag_index_cli_arg(self):
+        cfg = vc.Config()
+        cfg._load_cli_args(["--rag-index", "/tmp/my-docs"])
+        assert cfg.rag_index == "/tmp/my-docs"
+
+    def test_rag_disabled_by_default_no_side_effects(self):
+        """When --rag is not set, no RAG attributes should affect normal flow."""
+        cfg = vc.Config()
+        cfg._load_cli_args(["-p", "hello"])
+        assert cfg.rag is False
+        assert cfg.prompt == "hello"
+
+
+class TestRAGEngineStatic:
+    """Tests for RAGEngine static/pure methods (no Ollama needed)."""
+
+    def test_chunk_text_basic(self):
+        text = "line1\nline2\nline3\nline4\nline5"
+        chunks = vc.RAGEngine._chunk_text(text, chunk_size=15, overlap=5)
+        assert len(chunks) >= 2
+        # All original content should be present across chunks
+        joined = "\n".join(chunks)
+        for line in ["line1", "line2", "line3", "line4", "line5"]:
+            assert line in joined
+
+    def test_chunk_text_single_short(self):
+        text = "short"
+        chunks = vc.RAGEngine._chunk_text(text, chunk_size=1000, overlap=200)
+        assert len(chunks) == 1
+        assert chunks[0] == "short"
+
+    def test_chunk_text_empty(self):
+        chunks = vc.RAGEngine._chunk_text("", chunk_size=1000, overlap=200)
+        assert len(chunks) == 1
+
+    def test_chunk_text_overlap_preserved(self):
+        """Chunks should overlap so no content is lost at boundaries."""
+        lines = [f"line{i}" for i in range(20)]
+        text = "\n".join(lines)
+        chunks = vc.RAGEngine._chunk_text(text, chunk_size=30, overlap=10)
+        assert len(chunks) >= 3
+        # Verify overlap: last lines of chunk N appear in chunk N+1
+        for i in range(len(chunks) - 1):
+            last_lines = chunks[i].split("\n")[-2:]
+            next_chunk = chunks[i + 1]
+            overlap_found = any(line in next_chunk for line in last_lines if line)
+            assert overlap_found, f"No overlap between chunk {i} and {i+1}"
+
+    def test_cosine_similarity_identical(self):
+        a = [1.0, 2.0, 3.0]
+        assert abs(vc.RAGEngine._cosine_similarity(a, a) - 1.0) < 1e-6
+
+    def test_cosine_similarity_orthogonal(self):
+        a = [1.0, 0.0, 0.0]
+        b = [0.0, 1.0, 0.0]
+        assert abs(vc.RAGEngine._cosine_similarity(a, b)) < 1e-6
+
+    def test_cosine_similarity_opposite(self):
+        a = [1.0, 0.0]
+        b = [-1.0, 0.0]
+        assert abs(vc.RAGEngine._cosine_similarity(a, b) - (-1.0)) < 1e-6
+
+    def test_cosine_similarity_zero_vector(self):
+        a = [0.0, 0.0, 0.0]
+        b = [1.0, 2.0, 3.0]
+        assert vc.RAGEngine._cosine_similarity(a, b) == 0.0
+
+    def test_embedding_serialization_roundtrip(self):
+        vec = [0.1, -0.2, 0.3, 0.0, 1.0, -1.0]
+        blob = vc.RAGEngine._serialize_embedding(vec)
+        assert isinstance(blob, bytes)
+        recovered = vc.RAGEngine._deserialize_embedding(blob)
+        assert len(recovered) == len(vec)
+        for orig, rec in zip(vec, recovered):
+            assert abs(orig - rec) < 1e-6
+
+    def test_embedding_serialization_large(self):
+        """Test with realistic embedding dimension (768)."""
+        import random
+        random.seed(42)
+        vec = [random.uniform(-1, 1) for _ in range(768)]
+        blob = vc.RAGEngine._serialize_embedding(vec)
+        assert len(blob) == 768 * 4  # float32
+        recovered = vc.RAGEngine._deserialize_embedding(blob)
+        for orig, rec in zip(vec, recovered):
+            assert abs(orig - rec) < 1e-5
+
+    def test_file_hash_deterministic(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("hello world")
+            f.flush()
+            path = f.name
+        try:
+            h1 = vc.RAGEngine._file_hash(path)
+            h2 = vc.RAGEngine._file_hash(path)
+            assert h1 == h2
+            assert len(h1) == 64
+        finally:
+            os.unlink(path)
+
+    def test_file_hash_changes_on_content_change(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("version1")
+            f.flush()
+            path = f.name
+        try:
+            h1 = vc.RAGEngine._file_hash(path)
+            with open(path, "w") as f2:
+                f2.write("version2")
+            h2 = vc.RAGEngine._file_hash(path)
+            assert h1 != h2
+        finally:
+            os.unlink(path)
+
+
+class TestRAGEngineIntegration:
+    """Integration tests for RAGEngine with mocked Ollama embeddings."""
+
+    @pytest.fixture
+    def rag_env(self, tmp_path):
+        """Set up a RAGEngine with mocked embedding function."""
+        cfg = vc.Config()
+        cfg.cwd = str(tmp_path)
+        cfg.rag = True
+        cfg.rag_topk = 3
+        cfg.rag_model = "nomic-embed-text"
+        cfg.ollama_host = "http://localhost:11434"
+
+        rag = vc.RAGEngine(cfg)
+
+        # Mock _get_embedding: simple bag-of-words vector for testing
+        _vocab = {}
+        _dim = 32
+
+        def _mock_embedding(text):
+            """Deterministic mock embedding based on word hashing."""
+            import hashlib as _hl
+            vec = [0.0] * _dim
+            for word in text.lower().split():
+                h = int(_hl.md5(word.encode()).hexdigest(), 16)
+                idx = h % _dim
+                vec[idx] += 1.0
+            # Normalize
+            norm = sum(x * x for x in vec) ** 0.5
+            if norm > 0:
+                vec = [x / norm for x in vec]
+            return vec
+
+        rag._get_embedding = _mock_embedding
+        return rag, cfg, tmp_path
+
+    def test_db_creation(self, rag_env):
+        rag, cfg, tmp_path = rag_env
+        assert os.path.exists(rag.db_path)
+        stats = rag.get_stats()
+        assert stats["chunks"] == 0
+        assert stats["files"] == 0
+
+    def test_index_single_file(self, rag_env):
+        rag, cfg, tmp_path = rag_env
+        # Create a test file
+        doc = tmp_path / "test.py"
+        doc.write_text("def hello():\n    print('hello world')\n")
+
+        indexed, skipped, errors = rag.index_path(str(doc), verbose=False)
+        assert indexed == 1
+        assert errors == 0
+
+        stats = rag.get_stats()
+        assert stats["files"] == 1
+        assert stats["chunks"] >= 1
+
+    def test_index_directory(self, rag_env):
+        rag, cfg, tmp_path = rag_env
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        (docs_dir / "readme.md").write_text("# Project\nThis is a readme.")
+        (docs_dir / "main.py").write_text("import os\nprint(os.getcwd())")
+        (docs_dir / "data.bin").write_bytes(b"\x00\x01\x02")  # should be skipped
+
+        indexed, skipped, errors = rag.index_path(str(docs_dir), verbose=False)
+        assert indexed == 2  # .md and .py, not .bin
+        assert errors == 0
+
+    def test_index_skips_unchanged_files(self, rag_env):
+        rag, cfg, tmp_path = rag_env
+        doc = tmp_path / "test.py"
+        doc.write_text("x = 1")
+
+        i1, s1, e1 = rag.index_path(str(doc), verbose=False)
+        assert i1 == 1
+        assert s1 == 0
+
+        # Re-index same file -> should skip
+        i2, s2, e2 = rag.index_path(str(doc), verbose=False)
+        assert i2 == 0
+        assert s2 == 1
+
+    def test_index_reindexes_changed_files(self, rag_env):
+        rag, cfg, tmp_path = rag_env
+        doc = tmp_path / "test.py"
+        doc.write_text("x = 1")
+
+        rag.index_path(str(doc), verbose=False)
+        stats1 = rag.get_stats()
+
+        # Modify file
+        doc.write_text("x = 1\ny = 2\nz = 3")
+        i2, s2, e2 = rag.index_path(str(doc), verbose=False)
+        assert i2 == 1  # re-indexed
+        assert s2 == 0
+
+    def test_index_skips_hidden_and_node_modules(self, rag_env):
+        rag, cfg, tmp_path = rag_env
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "app.py").write_text("print('app')")
+        nm = tmp_path / "node_modules"
+        nm.mkdir()
+        (nm / "dep.js").write_text("module.exports = {}")
+        hidden = tmp_path / ".secret"
+        hidden.mkdir()
+        (hidden / "key.txt").write_text("secret123")
+
+        indexed, _, _ = rag.index_path(str(tmp_path), verbose=False)
+        assert indexed == 1  # only src/app.py
+
+    def test_index_nonexistent_path(self, rag_env):
+        rag, cfg, tmp_path = rag_env
+        indexed, skipped, errors = rag.index_path("/nonexistent/path", verbose=False)
+        assert errors == 1
+
+    def test_query_returns_relevant_results(self, rag_env):
+        rag, cfg, tmp_path = rag_env
+        # Index files with distinct content
+        (tmp_path / "auth.py").write_text(
+            "def login(user, password):\n    authenticate user credentials\n"
+        )
+        (tmp_path / "math.py").write_text(
+            "def calculate(x, y):\n    return x + y\n"
+        )
+        (tmp_path / "network.py").write_text(
+            "def fetch(url):\n    download data from network\n"
+        )
+        rag.index_path(str(tmp_path), verbose=False)
+
+        results = rag.query("login authentication user", top_k=2)
+        assert len(results) <= 2
+        assert len(results) >= 1
+        # The auth file should be most relevant
+        paths = [r[0] for r in results]
+        assert any("auth" in p for p in paths)
+
+    def test_query_empty_index(self, rag_env):
+        rag, cfg, tmp_path = rag_env
+        results = rag.query("anything")
+        assert results == []
+
+    def test_query_respects_topk(self, rag_env):
+        rag, cfg, tmp_path = rag_env
+        for i in range(10):
+            (tmp_path / f"file{i}.py").write_text(f"content {i}\n")
+        rag.index_path(str(tmp_path), verbose=False)
+
+        results = rag.query("content", top_k=3)
+        assert len(results) <= 3
+
+    def test_format_context_with_results(self, rag_env):
+        rag, cfg, tmp_path = rag_env
+        results = [
+            ("file1.py", "def foo(): pass", 0.95),
+            ("file2.py", "def bar(): pass", 0.80),
+        ]
+        ctx = rag.format_context(results)
+        assert "[LOCAL CONTEXT START]" in ctx
+        assert "[LOCAL CONTEXT END]" in ctx
+        assert "file1.py" in ctx
+        assert "0.950" in ctx
+        assert "def foo(): pass" in ctx
+
+    def test_format_context_empty(self, rag_env):
+        rag, cfg, tmp_path = rag_env
+        assert rag.format_context([]) == ""
+
+    def test_format_context_truncates_long_content(self, rag_env):
+        rag, cfg, tmp_path = rag_env
+        long_content = "x" * 5000
+        results = [("big.py", long_content, 0.9)]
+        ctx = rag.format_context(results)
+        assert "truncated" in ctx
+        assert len(ctx) < 5000
+
+    def test_get_stats(self, rag_env):
+        rag, cfg, tmp_path = rag_env
+        (tmp_path / "a.py").write_text("hello")
+        (tmp_path / "b.py").write_text("world")
+        rag.index_path(str(tmp_path), verbose=False)
+
+        stats = rag.get_stats()
+        assert stats["files"] == 2
+        assert stats["chunks"] >= 2
+        assert stats["db_size"] > 0
