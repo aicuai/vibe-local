@@ -4453,6 +4453,77 @@ def _load_skills(config):
     return skills
 
 
+def _load_json_skills(config):
+    """Load executable JSON skill definitions from skills/ directory."""
+    skills = {}  # name -> {definition, dir}
+    skill_dirs = [
+        os.path.join(config.cwd, "skills"),
+        os.path.join(config.cwd, ".vibe-local", "skills"),
+    ]
+    for skill_dir in skill_dirs:
+        if not os.path.isdir(skill_dir):
+            continue
+        try:
+            for entry in os.listdir(skill_dir):
+                if not entry.endswith(".json"):
+                    continue
+                fpath = os.path.join(skill_dir, entry)
+                if os.path.islink(fpath) or not os.path.isfile(fpath):
+                    continue
+                try:
+                    with open(fpath, encoding="utf-8") as f:
+                        defn = json.load(f)
+                    name = entry[:-5]  # remove .json
+                    skills[name] = {"definition": defn, "dir": config.cwd}
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                    pass
+        except OSError:
+            pass
+    # Also check for tutorial.py in cwd
+    tutorial_path = os.path.join(config.cwd, "tutorial.py")
+    if os.path.isfile(tutorial_path) and "tutorial" not in skills:
+        skills["tutorial"] = {
+            "definition": {
+                "name": "tutorial",
+                "description": "Run the interactive tutorial",
+            },
+            "dir": config.cwd,
+        }
+    return skills
+
+
+def _exec_json_skill(skill_name, skill_info, args_str):
+    """Execute a JSON skill via render.py or tutorial.py. Returns (ok, output)."""
+    cwd = skill_info["dir"]
+    if skill_name == "tutorial":
+        cmd = [sys.executable, os.path.join(cwd, "tutorial.py"), "--auto"]
+        # Parse --step from args_str
+        if args_str:
+            parts = args_str.strip().split()
+            for i, p in enumerate(parts):
+                if p == "--step" and i + 1 < len(parts):
+                    cmd.extend(["--step", parts[i + 1]])
+                elif not p.startswith("--"):
+                    cmd.extend(["--step", p])
+    else:
+        cmd = [sys.executable, os.path.join(cwd, "render.py"), skill_name]
+        # Parse --key value pairs from args_str
+        if args_str:
+            cmd.extend(args_str.strip().split())
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120, cwd=cwd
+        )
+        output = result.stdout
+        if result.returncode != 0 and result.stderr:
+            output += result.stderr
+        return result.returncode == 0, output.strip()
+    except subprocess.TimeoutExpired:
+        return False, "Skill execution timed out (120s)"
+    except Exception as e:
+        return False, f"Failed to execute skill: {e}"
+
+
 # ════════════════════════════════════════════════════════════════════════════════
 # Git Checkpoint & Rollback
 # ════════════════════════════════════════════════════════════════════════════════
@@ -5761,6 +5832,12 @@ class TUI:
                     "/execute", "/undo", "/init", "/config", "/debug", "/debug-scroll",
                     "/checkpoint", "/rollback", "/autotest", "/watch", "/skills",
                 ]
+                # Add JSON skill commands to tab-completion
+                _json_skills = _load_json_skills(config)
+                for _sn in _json_skills:
+                    _sc = f"/{_sn}"
+                    if _sc not in _slash_commands:
+                        _slash_commands.append(_sc)
                 def _completer(text, state):
                     if text.startswith("/"):
                         options = [c for c in _slash_commands if c.startswith(text)]
@@ -6550,7 +6627,7 @@ class TUI:
         self._spinner_thread = threading.Thread(target=_update, daemon=True)
         self._spinner_thread.start()
 
-    def show_help(self):
+    def show_help(self, config=None):
         """Show available commands with neon style."""
         _c51 = _ansi("\033[38;5;51m")
         _c87 = _ansi("\033[38;5;87m")
@@ -6599,8 +6676,17 @@ class TUI:
   {_c51}━━ Extensions {sep[13:]}{C.RESET}
   {_c198}/autotest{C.RESET}          Toggle auto lint+test after edits
   {_c198}/watch{C.RESET}             Toggle file watcher
-  {_c198}/skills{C.RESET}            List loaded skills
-  {_c51}━━ Keyboard {sep[11:]}{C.RESET}
+  {_c198}/skills{C.RESET}            List loaded skills""")
+        # Dynamic skills section
+        if config:
+            _json_sk = _load_json_skills(config)
+            if _json_sk:
+                print(f"""  {_c51}━━ Project Skills {sep[17:]}{C.RESET}""")
+                for sname in sorted(_json_sk.keys()):
+                    desc = _json_sk[sname]["definition"].get("description", "")
+                    padded = f"/{sname}".ljust(18)
+                    print(f"  {_c198}{padded}{C.RESET} {desc}")
+        print(f"""  {_c51}━━ Keyboard {sep[11:]}{C.RESET}
   {_c198}Ctrl+C{C.RESET}             Stop current task
   {_c198}Ctrl+C x2{C.RESET}          Exit (within 1.5s)
   {_c198}Ctrl+D{C.RESET}             Exit
@@ -7608,7 +7694,7 @@ def main():
                     print(f"  {_ansi(chr(27)+'[38;5;240m')}Resume anytime: python3 vibe-coder.py --resume{C.RESET}\n")
                     break
                 elif cmd == "/help":
-                    tui.show_help()
+                    tui.show_help(config=config)
                     continue
                 elif cmd == "/clear":
                     session.save()
@@ -8020,13 +8106,21 @@ def main():
                 # ── Skills list ───────────────────────────────────────
                 elif cmd == "/skills":
                     loaded_skills = _load_skills(config)
-                    if loaded_skills:
-                        _c51s = _ansi("\033[38;5;51m")
-                        _c87s = _ansi("\033[38;5;87m")
+                    _json_sk = _load_json_skills(config)
+                    _c51s = _ansi("\033[38;5;51m")
+                    _c87s = _ansi("\033[38;5;87m")
+                    _c198s = _ansi("\033[38;5;198m")
+                    _has_any = bool(loaded_skills) or bool(_json_sk)
+                    if _has_any:
                         print(f"\n  {_c51s}━━ Loaded Skills ━━━━━━━━━━━━━━━━━━{C.RESET}")
-                        for sname in sorted(loaded_skills.keys()):
-                            lines = len(loaded_skills[sname].split('\n'))
-                            print(f"  {_c87s}{sname}{C.RESET}  ({lines} lines)")
+                        if _json_sk:
+                            for sname in sorted(_json_sk.keys()):
+                                desc = _json_sk[sname]["definition"].get("description", "")
+                                print(f"  {_c198s}/{sname}{C.RESET}  {C.DIM}{desc}{C.RESET}")
+                        if loaded_skills:
+                            for sname in sorted(loaded_skills.keys()):
+                                lines = len(loaded_skills[sname].split('\n'))
+                                print(f"  {_c87s}{sname}{C.RESET}  ({lines} lines)")
                         print(f"  {_c51s}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{C.RESET}\n")
                     else:
                         print(f"{C.YELLOW}No skills loaded.{C.RESET}")
@@ -8109,6 +8203,22 @@ def main():
                     continue
 
                 else:
+                    # Check if it's a JSON skill command (e.g., /probe, /tutorial, /demo)
+                    _json_skills_dispatch = _load_json_skills(config)
+                    _skill_cmd = cmd[1:]  # strip leading /
+                    if _skill_cmd in _json_skills_dispatch:
+                        _skill_info = _json_skills_dispatch[_skill_cmd]
+                        _skill_args = user_input[len(cmd):].strip()
+                        _skill_desc = _skill_info["definition"].get("description", _skill_cmd)
+                        _c87d = _ansi("\033[38;5;87m")
+                        print(f"  {_c87d}▶ {_skill_cmd}{C.RESET}  {C.DIM}{_skill_desc}{C.RESET}")
+                        _ok, _output = _exec_json_skill(_skill_cmd, _skill_info, _skill_args)
+                        if _output:
+                            print(_output)
+                        if not _ok:
+                            print(f"{C.RED}Skill '{_skill_cmd}' exited with error.{C.RESET}")
+                        continue
+
                     # "Did you mean?" for typo'd slash commands
                     _all_cmds = ["/help", "/exit", "/quit", "/clear", "/model", "/models",
                                  "/status", "/save", "/compact", "/yes", "/no",
@@ -8116,6 +8226,11 @@ def main():
                                  "/approve", "/act", "/execute", "/undo", "/init",
                                  "/config", "/debug", "/debug-scroll", "/checkpoint",
                                  "/rollback", "/autotest", "/skills"]
+                    # Include JSON skill commands in "did you mean" suggestions
+                    for _sn in _json_skills_dispatch:
+                        _sc = f"/{_sn}"
+                        if _sc not in _all_cmds:
+                            _all_cmds.append(_sc)
                     _close = [c for c in _all_cmds if c.startswith(cmd[:3])] if len(cmd) >= 3 else []
                     if not _close:
                         _close = [c for c in _all_cmds if cmd[1:] in c] if len(cmd) > 1 else []
